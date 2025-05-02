@@ -17,11 +17,11 @@ Vulkan SDK
 [Meshoptimizer](https://github.com/zeux/meshoptimizer)
 
 ### Compilation
-
+```
 git clone https://github.com/rostyslav-sydor/gpu-lod-generation-vulkan vulkan_lod
 cd vulkan_lod
 make all
-
+```
 ### Attribution
 
 [stb](https://github.com/nothings/stb) library is used to load texture data
