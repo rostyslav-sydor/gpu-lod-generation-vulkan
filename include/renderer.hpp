@@ -1,3 +1,5 @@
+// Most of the bare renderer implementation is based on code by https://vulkan-tutorial.com
+
 #define GLFW_INCLUDE_VULKAN
 #include <GLFW/glfw3.h>
 
