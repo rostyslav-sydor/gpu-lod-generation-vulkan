@@ -1,10 +1,11 @@
-CFLAGS = -std=c++17 -O2
+CFLAGS = -std=c++17 -O2 -I./include/
 LDFLAGS = -lglfw -lvulkan -ldl -lpthread -lX11 -lXxf86vm -lXrandr -lXi -lglm -lassimp -lmeshoptimizer
 SHADER_DBG_FLAGS = -O
+SOURCES := $(wildcard src/*.cpp)
 
-VulkanBasics: main.cpp simplifier.cpp
+VulkanLOD: $(SOURCES)
 	LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib/
-	g++ $(CFLAGS) -o VulkanBasics main.cpp $(LDFLAGS)
+	g++ $(CFLAGS) -o VulkanLOD $(SOURCES) $(LDFLAGS)
 
 recomp_shaders: 
 	glslc -fshader-stage=comp $(SHADER_DBG_FLAGS) shaders/simpify.glsl -o shaders/comp.spv
@@ -13,10 +14,10 @@ recomp_shaders:
 
 .PHONY: test clean recomp_shaders
 
-all: recomp_shaders VulkanBasics test
+all: recomp_shaders VulkanLOD test
 
-test: VulkanBasics
-	VK_LAYER_PRINTF_BUFFER_SIZE=8192 ./VulkanBasics
+test: VulkanLOD
+	VK_LAYER_PRINTF_BUFFER_SIZE=8192 ./VulkanLOD
 
 clean:
-	rm -f VulkanBasics
+	rm -f VulkanLOD
