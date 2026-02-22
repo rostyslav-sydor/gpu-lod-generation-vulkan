@@ -1,0 +1,37 @@
+#version 460
+#extension GL_EXT_shader_atomic_int64 : require
+
+// ============================================================================
+// Pass 10: Mark Degenerate Triangles
+//
+// Dispatch: ceil(triangleCount / WORKGROUP_SIZE) workgroups
+// 1 thread per triangle.
+//
+// Checks each triangle for degeneracy (2 or more identical position indices
+// after edge collapse) and writes a flag.
+//
+// Prerequisites:
+//   - posIndices[] updated by collapse pass (Pass 9)
+//
+// Result:
+//   aliveFlags[t] = 1 if triangle is valid, 0 if degenerate
+// ============================================================================
+
+#include "common.glsl"
+#include "bindings.glsl"
+
+layout(local_size_x = WORKGROUP_SIZE) in;
+
+void main() {
+    uint gid = gl_GlobalInvocationID.x;
+    if (gid >= triangleCount) return;
+
+    uint base = gid * 3u;
+    uint v0 = posIndices[base + 0u];
+    uint v1 = posIndices[base + 1u];
+    uint v2 = posIndices[base + 2u];
+
+    // Triangle is degenerate if any two position indices are the same
+    bool degenerate = (v0 == v1) || (v1 == v2) || (v0 == v2);
+    aliveFlags[gid] = degenerate ? 0u : 1u;
+}

@@ -1,0 +1,66 @@
+#version 460
+#extension GL_EXT_shader_atomic_int64 : require
+
+// ============================================================================
+// Pass 1: Hash Vertices (Full Attribute Deduplication)
+//
+// Dispatch: ceil(vertexCount / WORKGROUP_SIZE) workgroups
+// 1 thread per vertex.
+//
+// Inserts each vertex into a hash map keyed by all attributes (pos + normal).
+// Produces vertexMap[i] = canonical index for vertex i.
+// Also builds position-only hash for generating PB and flagging discontinuities.
+// ============================================================================
+
+#include "common.glsl"
+#include "bindings.glsl"
+
+layout(local_size_x = WORKGROUP_SIZE) in;
+
+void main() {
+    uint gid = gl_GlobalInvocationID.x;
+    if (gid >= vertexCount) return;
+
+    Vertex v = loadVertex(gid);
+
+    // --- Full attribute dedup ---
+    uint fullHash = hash_vertex(v);
+    uint key_high = fullHash;
+    uint key_low  = hash_combine(hash_float(v.pos.x), hash_float(v.normal.z));
+
+    uint mask = hashMapSize - 1u;
+    uint slot = murmur_mix(key_high ^ key_low) & mask;
+
+    // Open-addressing insert with linear probing
+    for (uint probe = 0u; probe < MAX_PROBES; probe++) {
+        uint s = (slot + probe) & mask;
+
+        uint prev = atomicCompSwap(hashMapData[s].z, HASHMAP_EMPTY, gid);
+
+        if (prev == HASHMAP_EMPTY) {
+            // We claimed this slot — write our key
+            hashMapData[s].x = key_high;
+            hashMapData[s].y = key_low;
+            // This vertex is its own canonical representative
+            vertexMap[gid] = gid;
+            return;
+        }
+
+        // Slot occupied — wait for key to be written, then compare
+        memoryBarrierBuffer();
+
+        if (hashMapData[s].x == key_high && hashMapData[s].y == key_low) {
+            // Potential match — verify actual attributes to handle hash collisions
+            uint canonical = hashMapData[s].z;
+            Vertex existing = loadVertex(canonical);
+            if (vertices_equal(v, existing)) {
+                vertexMap[gid] = canonical;
+                return;
+            }
+            // Hash collision with different attributes — continue probing
+        }
+    }
+
+    // Fallback: couldn't find slot (table too full), map to self
+    vertexMap[gid] = gid;
+}

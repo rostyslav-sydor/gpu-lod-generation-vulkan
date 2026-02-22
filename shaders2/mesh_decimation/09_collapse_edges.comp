@@ -1,0 +1,119 @@
+#version 460
+#extension GL_EXT_shader_atomic_int64 : require
+
+// ============================================================================
+// Pass 9: Check Winners and Perform Edge Collapse
+//
+// Dispatch: ceil(edgeCount / WORKGROUP_SIZE) workgroups
+// 1 thread per edge.
+//
+// For each ELIGIBLE edge, checks whether it "won" the atomic-min race in
+// ALL adjacent triangles. If triDescriptor[t] matches this edge's descriptor
+// for every adjacent triangle, the edge is safe to collapse without
+// interfering with any other collapse operation.
+//
+// Collapse action:
+//   - Merge vertex v1 into v0 at the optimal position from Pass 6
+//   - Update posIndices: replace v1 with v0 in all adjacent triangles of v1
+//   - Mark v1 as COLLAPSED
+//   - Increment collapse counter
+//
+// Prerequisites:
+//   - triDescriptor[] from Pass 8
+//   - edgeTarget[] from Pass 6
+//   - All topology buffers
+//
+// Result:
+//   - Vertices and indices updated with collapse operations
+//   - Some triangles become degenerate (2+ identical vertices)
+//   - counters[COUNTER_COLLAPSE_COUNT] = number of edges collapsed
+// ============================================================================
+
+#include "common.glsl"
+#include "bindings.glsl"
+
+layout(local_size_x = WORKGROUP_SIZE) in;
+
+// Check if this edge's descriptor matches all adjacent triangles of a vertex
+bool checkVertex(uint vertIdx, uint64_t descriptor) {
+    uint triIdx = adjHead[vertIdx];
+    uint safety = 0u;
+
+    while (triIdx != NONE && safety < 256u) {
+        if (triDescriptor[triIdx] != descriptor) {
+            return false;
+        }
+
+        uint base = triIdx * 3u;
+        if (posIndices[base + 0u] == vertIdx)       triIdx = triAdjNext[base + 0u];
+        else if (posIndices[base + 1u] == vertIdx)   triIdx = triAdjNext[base + 1u];
+        else                                          triIdx = triAdjNext[base + 2u];
+
+        safety++;
+    }
+    return true;
+}
+
+// Replace all occurrences of oldVert with newVert in triangles adjacent to oldVert
+void replaceInAdjacent(uint oldVert, uint newVert) {
+    uint triIdx = adjHead[oldVert];
+    uint safety = 0u;
+
+    while (triIdx != NONE && safety < 256u) {
+        uint base = triIdx * 3u;
+        uint nextTri = NONE;
+
+        for (uint k = 0u; k < 3u; k++) {
+            if (posIndices[base + k] == oldVert) {
+                posIndices[base + k] = newVert;
+                // Also update the original index buffer
+                indices[base + k] = newVert;
+                nextTri = triAdjNext[base + k];
+            }
+        }
+
+        triIdx = nextTri;
+        safety++;
+    }
+}
+
+void main() {
+    uint gid = gl_GlobalInvocationID.x;
+    if (gid >= edgeCount) return;
+
+    if ((edgeFlags[gid] & EDGE_ELIGIBLE) == 0u) return;
+
+    uvec2 edge = edges[gid];
+    uint v0 = edge.x;
+    uint v1 = edge.y;
+
+    float cost = edgeCost[gid];
+    uint costBits = floatBitsToUint(cost);
+    uint64_t descriptor = (uint64_t(costBits) << 32) | uint64_t(gid);
+
+    // Check if we won the race for ALL adjacent triangles of BOTH vertices
+    bool wonV0 = checkVertex(v0, descriptor);
+    bool wonV1 = checkVertex(v1, descriptor);
+
+    if (!wonV0 || !wonV1) return;
+
+    // --- We won! Perform the collapse: merge v1 into v0 ---
+
+    // Update v0 to the optimal position
+    vec4 optPos    = edgeTarget[gid * 2u + 0u];
+    vec4 optNormal = edgeTarget[gid * 2u + 1u];
+
+    Vertex newVert;
+    newVert.pos    = optPos.xyz;
+    newVert.normal = optNormal.xyz;
+    storeVertex(v0, newVert);
+
+    // Replace v1 with v0 in all adjacent triangles of v1
+    replaceInAdjacent(v1, v0);
+
+    // Mark v1 as collapsed
+    atomicOr(vertexFlags[v1], FLAG_COLLAPSED);
+
+    // Increment collapse counter
+    atomicAdd(counters[COUNTER_COLLAPSE_COUNT], 1u);
+}

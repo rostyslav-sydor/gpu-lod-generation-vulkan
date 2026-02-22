@@ -1,0 +1,109 @@
+#version 460
+#extension GL_EXT_shader_atomic_int64 : require
+
+// ============================================================================
+// Pass 4: Build Unique Edge List
+//
+// Dispatch: ceil(triangleCount / WORKGROUP_SIZE) workgroups
+// 1 thread per triangle.
+//
+// For each triangle, inserts its 3 edges into an edge hash map. Edges are
+// canonicalized by sorting vertex indices (min, max). Assigns unique edge
+// indices via atomicAdd on the edge counter. Records which triangles are
+// adjacent to each edge. Flags boundary edges (only 1 adjacent triangle).
+//
+// Prerequisites:
+//   - hashMapData[] (third region, offset = 2 * hashMapSize) must be cleared.
+//   - counters[COUNTER_EDGE_COUNT] must be 0.
+//
+// Result:
+//   edges[edgeIdx] = uvec2(v0, v1) with v0 < v1
+//   edgeTriangles[edgeIdx*2+0/1] = tri0, tri1  (tri1 = NONE if boundary)
+//   triEdges[tri*3 + k] = edge index for the k-th edge of triangle tri
+// ============================================================================
+
+#include "common.glsl"
+#include "bindings.glsl"
+
+layout(local_size_x = WORKGROUP_SIZE) in;
+
+#define EDGE_MAP_OFFSET (hashMapSize * 2u)
+
+void insertEdge(uint v0, uint v1, uint triIdx, uint localEdge) {
+    // Canonicalize edge: smaller index first
+    uint eMin = min(v0, v1);
+    uint eMax = max(v0, v1);
+
+    uint key_high = eMin;
+    uint key_low  = eMax;
+    uint edgeHash = hash_edge(eMin, eMax);
+
+    uint mask = hashMapSize - 1u;
+    uint slot = edgeHash & mask;
+
+    for (uint probe = 0u; probe < MAX_PROBES; probe++) {
+        uint s = EDGE_MAP_OFFSET + ((slot + probe) & mask);
+
+        // Try to claim this slot using the high key part
+        uint prev = atomicCompSwap(hashMapData[s].x, HASHMAP_EMPTY, key_high);
+
+        if (prev == HASHMAP_EMPTY) {
+            // We claimed this slot — this is a new edge
+            hashMapData[s].y = key_low;
+
+            // Allocate edge index
+            uint edgeIdx = atomicAdd(counters[COUNTER_EDGE_COUNT], 1u);
+            hashMapData[s].z = edgeIdx;
+
+            // Store edge vertices
+            edges[edgeIdx] = uvec2(eMin, eMax);
+
+            // First adjacent triangle
+            edgeTriangles[edgeIdx * 2u + 0u] = triIdx;
+            edgeTriangles[edgeIdx * 2u + 1u] = NONE;
+
+            // Store edge index in triangle
+            triEdges[triIdx * 3u + localEdge] = edgeIdx;
+            return;
+        }
+
+        memoryBarrierBuffer();
+
+        // Check if this slot has our edge
+        if (hashMapData[s].x == key_high && hashMapData[s].y == key_low) {
+            uint edgeIdx = hashMapData[s].z;
+
+            // Spin until edgeIdx is written (it might not be visible yet)
+            while (edgeIdx == 0u && hashMapData[s].z == 0u && prev == key_high) {
+                memoryBarrierBuffer();
+                edgeIdx = hashMapData[s].z;
+            }
+            edgeIdx = hashMapData[s].z;
+
+            // Record second adjacent triangle (manifold: at most 2)
+            atomicCompSwap(edgeTriangles[edgeIdx * 2u + 1u], NONE, triIdx);
+
+            // Store edge index in triangle
+            triEdges[triIdx * 3u + localEdge] = edgeIdx;
+            return;
+        }
+    }
+
+    // Table full — should not happen with proper sizing
+    triEdges[triIdx * 3u + localEdge] = NONE;
+}
+
+void main() {
+    uint gid = gl_GlobalInvocationID.x;
+    if (gid >= triangleCount) return;
+
+    uint baseIdx = gid * 3u;
+    uint v0 = posIndices[baseIdx + 0u];
+    uint v1 = posIndices[baseIdx + 1u];
+    uint v2 = posIndices[baseIdx + 2u];
+
+    // 3 edges of the triangle: (v0,v1), (v1,v2), (v2,v0)
+    insertEdge(v0, v1, gid, 0u);
+    insertEdge(v1, v2, gid, 1u);
+    insertEdge(v2, v0, gid, 2u);
+}

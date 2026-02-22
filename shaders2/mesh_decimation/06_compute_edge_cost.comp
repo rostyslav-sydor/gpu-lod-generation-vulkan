@@ -1,0 +1,159 @@
+#version 460
+#extension GL_EXT_shader_atomic_int64 : require
+
+// ============================================================================
+// Pass 6: Compute Edge Collapse Cost and Determine Eligibility
+//
+// Dispatch: ceil(edgeCount / WORKGROUP_SIZE) workgroups
+// 1 thread per edge.
+//
+// For each edge, computes the QEM cost by summing the quadrics of its two
+// endpoints and finding the optimal collapse position. Determines whether
+// the edge is eligible for collapse based on:
+//   - Cost must be below the user-defined threshold
+//   - Topology constraints (boundary/discontinuity preservation)
+//   - Resulting valence check
+//
+// Prerequisites:
+//   - quadricsData[] populated from Pass 5
+//   - edges[], edgeTriangles[] from Pass 4
+//   - vertexFlags[] from Pass 2
+//
+// Result:
+//   edgeCost[e] = QEM collapse cost
+//   edgeFlags[e] = EDGE_ELIGIBLE if the edge can be collapsed
+//   edgeTarget[e*2+0] = optimal position, edgeTarget[e*2+1] = interpolated normal
+// ============================================================================
+
+#include "common.glsl"
+#include "bindings.glsl"
+
+layout(local_size_x = WORKGROUP_SIZE) in;
+
+// Count triangles adjacent to a vertex by walking its adjacency list
+uint countAdjacent(uint vertIdx) {
+    uint count = 0u;
+    uint triIdx = adjHead[vertIdx];
+    while (triIdx != NONE && count < 64u) {
+        count++;
+        // Find which slot (0,1,2) of this triangle references vertIdx
+        uint base = triIdx * 3u;
+        if (posIndices[base + 0u] == vertIdx)      triIdx = triAdjNext[base + 0u];
+        else if (posIndices[base + 1u] == vertIdx)  triIdx = triAdjNext[base + 1u];
+        else                                         triIdx = triAdjNext[base + 2u];
+    }
+    return count;
+}
+
+void main() {
+    uint gid = gl_GlobalInvocationID.x;
+    if (gid >= edgeCount) return;
+
+    uvec2 edge = edges[gid];
+    uint v0 = edge.x;
+    uint v1 = edge.y;
+
+    uint flags0 = vertexFlags[v0];
+    uint flags1 = vertexFlags[v1];
+
+    // --- Topology checks ---
+    uint eFlags = 0u;
+
+    // Check if this is a boundary edge
+    bool isBoundary = (edgeTriangles[gid * 2u + 1u] == NONE);
+    if (isBoundary) {
+        eFlags |= EDGE_BOUNDARY;
+    }
+
+    // Discontinuity preservation:
+    // If one vertex is a discontinuity and the other is not, collapsing
+    // would alter the topology of the discontinuity — not eligible.
+    bool disc0 = (flags0 & FLAG_DISCONTINUITY) != 0u;
+    bool disc1 = (flags1 & FLAG_DISCONTINUITY) != 0u;
+
+    bool topologyOk = true;
+
+    if (disc0 != disc1) {
+        // One is discontinuity, other isn't — can't collapse
+        topologyOk = false;
+    }
+
+    // Boundary preservation:
+    // If one vertex is on a boundary and the other isn't, don't collapse
+    bool bnd0 = (flags0 & FLAG_BOUNDARY) != 0u;
+    bool bnd1 = (flags1 & FLAG_BOUNDARY) != 0u;
+    if (bnd0 != bnd1) {
+        topologyOk = false;
+    }
+
+    // On boundary edges, only collapse if both endpoints are boundary vertices
+    if (isBoundary && !(bnd0 && bnd1)) {
+        topologyOk = false;
+    }
+
+    // --- Compute QEM cost ---
+    Quadric q0 = loadQuadric(v0);
+    Quadric q1 = loadQuadric(v1);
+    Quadric qe = quadric_add(q0, q1);
+
+    vec3 optPos;
+    float cost;
+
+    bool invertible = quadric_optimal(qe, optPos);
+
+    if (invertible) {
+        cost = quadric_evaluate(qe, optPos);
+    } else {
+        // Singular matrix — evaluate at both endpoints and midpoint
+        Vertex vert0 = loadVertex(v0);
+        Vertex vert1 = loadVertex(v1);
+        vec3 mid = (vert0.pos + vert1.pos) * 0.5;
+
+        float c0 = quadric_evaluate(qe, vert0.pos);
+        float c1 = quadric_evaluate(qe, vert1.pos);
+        float cm = quadric_evaluate(qe, mid);
+
+        if (c0 <= c1 && c0 <= cm) {
+            cost = c0;
+            optPos = vert0.pos;
+        } else if (c1 <= cm) {
+            cost = c1;
+            optPos = vert1.pos;
+        } else {
+            cost = cm;
+            optPos = mid;
+        }
+    }
+
+    // Clamp negative costs (numerical noise)
+    cost = max(cost, 0.0);
+
+    edgeCost[gid] = cost;
+
+    // --- Valence check ---
+    // Prevent creating vertices with very high valence
+    uint valence0 = countAdjacent(v0);
+    uint valence1 = countAdjacent(v1);
+    // After collapse, rough new valence = valence0 + valence1 - 4 (for manifold interior)
+    bool valenceOk = (valence0 + valence1) <= 24u;
+
+    // --- Eligibility ---
+    bool eligible = topologyOk && valenceOk && (cost < costThreshold);
+    if (eligible) {
+        eFlags |= EDGE_ELIGIBLE;
+    }
+
+    edgeFlags[gid] = eFlags;
+
+    // Store optimal collapse target
+    if (eligible) {
+        Vertex vert0 = loadVertex(v0);
+        Vertex vert1 = loadVertex(v1);
+
+        // Interpolate normal
+        vec3 optNormal = normalize(vert0.normal + vert1.normal);
+
+        edgeTarget[gid * 2u + 0u] = vec4(optPos, 0.0);
+        edgeTarget[gid * 2u + 1u] = vec4(optNormal, 0.0);
+    }
+}

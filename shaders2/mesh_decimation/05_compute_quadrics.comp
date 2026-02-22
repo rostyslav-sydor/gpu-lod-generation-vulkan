@@ -1,0 +1,70 @@
+#version 460
+#extension GL_EXT_shader_atomic_int64 : require
+
+// ============================================================================
+// Pass 5: Compute Per-Vertex Quadric Error Matrices
+//
+// Dispatch: ceil(triangleCount / WORKGROUP_SIZE) workgroups
+// 1 thread per triangle.
+//
+// For each triangle, computes the plane equation and its fundamental quadric
+// matrix, then atomically accumulates it into the quadric of each vertex.
+// Uses fixed-point integer encoding for atomic addition.
+//
+// Prerequisites:
+//   - quadricsData[] must be cleared to 0 before dispatch.
+//   - posIndices[] (PB) must be populated.
+//
+// Result:
+//   quadricsData[v*10..v*10+9] = sum of plane quadrics of all adjacent triangles
+//   (fixed-point encoded, read via loadQuadric())
+// ============================================================================
+
+#include "common.glsl"
+#include "bindings.glsl"
+
+layout(local_size_x = WORKGROUP_SIZE) in;
+
+void main() {
+    uint gid = gl_GlobalInvocationID.x;
+    if (gid >= triangleCount) return;
+
+    uint baseIdx = gid * 3u;
+
+    uint i0 = posIndices[baseIdx + 0u];
+    uint i1 = posIndices[baseIdx + 1u];
+    uint i2 = posIndices[baseIdx + 2u];
+
+    vec3 p0 = loadVertex(i0).pos;
+    vec3 p1 = loadVertex(i1).pos;
+    vec3 p2 = loadVertex(i2).pos;
+
+    // Compute triangle normal (not normalized — area-weighted quadric)
+    vec3 edge1 = p1 - p0;
+    vec3 edge2 = p2 - p0;
+    vec3 n = cross(edge1, edge2);
+    float area2 = length(n);
+
+    // Skip degenerate triangles
+    if (area2 < 1e-12) return;
+
+    n = n / area2;  // normalize
+
+    // Plane equation: n.x * x + n.y * y + n.z * z + d = 0
+    float d = -dot(n, p0);
+    vec4 plane = vec4(n, d);
+
+    // Fundamental quadric from plane: K_p = p * p^T
+    Quadric qr = quadric_from_plane(plane);
+
+    // Weight by triangle area (half the cross product magnitude)
+    float weight = area2 * 0.5;
+    for (int i = 0; i < 10; i++) {
+        qr.q[i] *= weight;
+    }
+
+    // Atomically accumulate into each vertex's quadric
+    atomicAddQuadric(i0, qr);
+    atomicAddQuadric(i1, qr);
+    atomicAddQuadric(i2, qr);
+}

@@ -1,5 +1,12 @@
 // Most of the bare renderer implementation is based on code by https://vulkan-tutorial.com
 
+// Define WSL_COMPAT to relax Vulkan requirements for WSL2/software drivers:
+//  - Lowers API version from 1.4 to 1.1
+//  - Makes VK_KHR_shader_non_semantic_info optional
+//  - Falls back to graphics queue for compute if no dedicated compute queue
+// Undefine this when targeting real hardware.
+#define WSL_COMPAT
+
 #define GLFW_INCLUDE_VULKAN
 #include <GLFW/glfw3.h>
 
@@ -59,10 +66,20 @@ const std::vector<const char*> validationLayers = {
     "VK_LAYER_KHRONOS_validation"
 };
 
+#ifdef WSL_COMPAT
+const std::vector<const char*> deviceExtensions = {
+    VK_KHR_SWAPCHAIN_EXTENSION_NAME,
+};
+const std::vector<const char*> optionalDeviceExtensions = {
+    VK_KHR_SHADER_NON_SEMANTIC_INFO_EXTENSION_NAME
+};
+#else
 const std::vector<const char*> deviceExtensions = {
     VK_KHR_SWAPCHAIN_EXTENSION_NAME,
     VK_KHR_SHADER_NON_SEMANTIC_INFO_EXTENSION_NAME
 };
+const std::vector<const char*> optionalDeviceExtensions = {};
+#endif
 
 struct QueueFamilyIndices {
     std::optional<uint32_t> graphicsFamily;

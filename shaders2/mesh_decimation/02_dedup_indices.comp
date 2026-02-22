@@ -1,0 +1,90 @@
+#version 460
+#extension GL_EXT_shader_atomic_int64 : require
+
+// ============================================================================
+// Pass 2: Deduplicate Index Buffers
+//
+// Dispatch: ceil(triangleCount / WORKGROUP_SIZE) workgroups
+// 1 thread per triangle.
+//
+// Phase A: Remap IB using vertexMap (full attribute dedup).
+// Phase B: Build position-only hash map, generate PB, flag discontinuities.
+//
+// NOTE: The position hash map uses the SECOND HALF of hashMapData
+//       (offset = hashMapSize) so we don't conflict with Phase 1's map.
+//       The host must allocate hashMapData with 2 * hashMapSize entries
+//       and clear the second half before this dispatch.
+// ============================================================================
+
+#include "common.glsl"
+#include "bindings.glsl"
+
+layout(local_size_x = WORKGROUP_SIZE) in;
+
+#define POS_MAP_OFFSET hashMapSize
+
+void main() {
+    uint gid = gl_GlobalInvocationID.x;
+    if (gid >= triangleCount) return;
+
+    uint baseIdx = gid * 3u;
+
+    // --- Phase A: Remap indices through full-attribute dedup ---
+    for (uint i = 0u; i < 3u; i++) {
+        uint origIdx = indices[baseIdx + i];
+        uint canonical = vertexMap[origIdx];
+        indices[baseIdx + i] = canonical;
+    }
+
+    // --- Phase B: Position-only dedup to build PB and flag discontinuities ---
+    for (uint i = 0u; i < 3u; i++) {
+        uint vertIdx = indices[baseIdx + i];
+        Vertex v = loadVertex(vertIdx);
+
+        uint posHash = hash_position(v.pos);
+        uint key_high = posHash;
+        uint key_low  = hash_combine(hash_float(v.pos.y), hash_float(v.pos.z));
+
+        uint mask = hashMapSize - 1u;
+        uint slot = murmur_mix(key_high ^ key_low) & mask;
+
+        uint posCanonical = vertIdx;  // default: self
+
+        for (uint probe = 0u; probe < MAX_PROBES; probe++) {
+            uint s = POS_MAP_OFFSET + ((slot + probe) & mask);
+
+            uint prev = atomicCompSwap(hashMapData[s].z, HASHMAP_EMPTY, vertIdx);
+
+            if (prev == HASHMAP_EMPTY) {
+                // First vertex at this position
+                hashMapData[s].x = key_high;
+                hashMapData[s].y = key_low;
+                posCanonical = vertIdx;
+                break;
+            }
+
+            memoryBarrierBuffer();
+
+            if (hashMapData[s].x == key_high && hashMapData[s].y == key_low) {
+                uint existingIdx = hashMapData[s].z;
+                Vertex existing = loadVertex(existingIdx);
+
+                if (positions_equal(v.pos, existing.pos)) {
+                    posCanonical = existingIdx;
+
+                    // If full-attribute indices differ but positions match,
+                    // this is a discontinuity (e.g., UV seam, hard normal edge)
+                    if (vertIdx != existingIdx) {
+                        atomicOr(vertexFlags[vertIdx], FLAG_DISCONTINUITY);
+                        atomicOr(vertexFlags[existingIdx], FLAG_DISCONTINUITY);
+                    }
+                    break;
+                }
+            }
+        }
+
+        // Write position-only index buffer
+        posIndices[baseIdx + i] = posCanonical;
+        posMap[vertIdx] = posCanonical;
+    }
+}

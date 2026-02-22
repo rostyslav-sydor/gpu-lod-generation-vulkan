@@ -1,0 +1,27 @@
+#version 460
+#extension GL_EXT_shader_atomic_int64 : require
+
+// ============================================================================
+// Pass 7: Initialize Per-Triangle Edge Descriptors
+//
+// Dispatch: ceil(triangleCount / WORKGROUP_SIZE) workgroups
+// 1 thread per triangle.
+//
+// Sets every triangle's 64-bit descriptor to the maximum value (0xFFFF...).
+// This prepares for the atomic-min scatter in Pass 8.
+//
+// Result:
+//   triDescriptor[t] = 0xFFFFFFFFFFFFFFFF for all triangles
+// ============================================================================
+
+#include "common.glsl"
+#include "bindings.glsl"
+
+layout(local_size_x = WORKGROUP_SIZE) in;
+
+void main() {
+    uint gid = gl_GlobalInvocationID.x;
+    if (gid >= triangleCount) return;
+
+    triDescriptor[gid] = 0xFFFFFFFFFFFFFFFFul;
+}

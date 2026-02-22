@@ -1,0 +1,70 @@
+#version 460
+#extension GL_EXT_shader_atomic_int64 : require
+
+// ============================================================================
+// Pass 8: Scatter Edge Descriptors via Atomic Min
+//
+// Dispatch: ceil(edgeCount / WORKGROUP_SIZE) workgroups
+// 1 thread per edge.
+//
+// For each ELIGIBLE edge, constructs a 64-bit descriptor encoding the cost
+// in the upper 32 bits and the edge index in the lower 32 bits. Then walks
+// the adjacency lists of both endpoints and performs atomicMin on every
+// adjacent triangle's descriptor.
+//
+// The IEEE 754 bit trick: for positive floats, the uint32 bit pattern
+// preserves ordering, so uint64 comparison on (cost_bits << 32 | edgeIdx)
+// correctly picks the lowest-cost edge, with edge index as tiebreaker.
+//
+// Prerequisites:
+//   - triDescriptor[] initialized to MAX from Pass 7
+//   - edgeFlags[], edgeCost[] from Pass 6
+//   - adjHead[], triAdjNext[], posIndices[] from Passes 2-3
+//
+// Result:
+//   triDescriptor[t] = descriptor of the lowest-cost eligible edge
+//                       in the neighborhood of triangle t
+// ============================================================================
+
+#include "common.glsl"
+#include "bindings.glsl"
+
+layout(local_size_x = WORKGROUP_SIZE) in;
+
+// Walk adjacency list of a vertex and atomicMin the descriptor onto each triangle
+void scatterToVertex(uint vertIdx, uint64_t descriptor) {
+    uint triIdx = adjHead[vertIdx];
+    uint safety = 0u;
+
+    while (triIdx != NONE && safety < 256u) {
+        atomicMin(triDescriptor[triIdx], descriptor);
+
+        // Advance to next triangle in linked list for this vertex
+        uint base = triIdx * 3u;
+        if (posIndices[base + 0u] == vertIdx)       triIdx = triAdjNext[base + 0u];
+        else if (posIndices[base + 1u] == vertIdx)   triIdx = triAdjNext[base + 1u];
+        else                                          triIdx = triAdjNext[base + 2u];
+
+        safety++;
+    }
+}
+
+void main() {
+    uint gid = gl_GlobalInvocationID.x;
+    if (gid >= edgeCount) return;
+
+    // Only process eligible edges
+    if ((edgeFlags[gid] & EDGE_ELIGIBLE) == 0u) return;
+
+    float cost = edgeCost[gid];
+
+    // Construct 64-bit descriptor: cost bits in upper 32, edge index in lower 32
+    // Positive IEEE 754 floats have the same ordering as their uint bit patterns
+    uint costBits = floatBitsToUint(cost);
+    uint64_t descriptor = (uint64_t(costBits) << 32) | uint64_t(gid);
+
+    // Scatter to all triangles adjacent to both endpoints
+    uvec2 edge = edges[gid];
+    scatterToVertex(edge.x, descriptor);
+    scatterToVertex(edge.y, descriptor);
+}
