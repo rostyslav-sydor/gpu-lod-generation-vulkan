@@ -3,6 +3,10 @@ LDFLAGS = -L/usr/local/lib -lglfw -lvulkan -ldl -lpthread -lX11 -lXxf86vm -lXran
 SHADER_DBG_FLAGS = -O
 SOURCES := $(wildcard src/*.cpp)
 
+DECIMATION_DIR = shaders2/mesh_decimation
+DECIMATION_COMPS = $(sort $(wildcard $(DECIMATION_DIR)/*.comp))
+DECIMATION_SPVS = $(DECIMATION_COMPS:.comp=.spv)
+
 VulkanLOD: $(SOURCES)
 	g++ $(CFLAGS) -o VulkanLOD $(SOURCES) $(LDFLAGS) -Wl,-rpath,/usr/local/lib
 
@@ -11,9 +15,14 @@ recomp_shaders:
 	glslc -fshader-stage=vert $(SHADER_DBG_FLAGS) shaders/vertex.glsl -c -o shaders/vert.spv
 	glslc -fshader-stage=frag $(SHADER_DBG_FLAGS) shaders/fragment.glsl -o shaders/frag.spv
 
-.PHONY: test clean recomp_shaders
+$(DECIMATION_DIR)/%.spv: $(DECIMATION_DIR)/%.comp $(DECIMATION_DIR)/common.glsl $(DECIMATION_DIR)/bindings.glsl
+	glslc -fshader-stage=comp --target-env=vulkan1.1 -I $(DECIMATION_DIR) $(SHADER_DBG_FLAGS) $< -o $@
 
-all: recomp_shaders VulkanLOD test
+recomp_decimation_shaders: $(DECIMATION_SPVS)
+
+.PHONY: test clean recomp_shaders recomp_decimation_shaders
+
+all: recomp_shaders recomp_decimation_shaders VulkanLOD test
 
 test: VulkanLOD
 	VK_LAYER_PRINTF_BUFFER_SIZE=8192 ./VulkanLOD

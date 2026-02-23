@@ -1,6 +1,8 @@
 #ifndef COMMON_GLSL
 #define COMMON_GLSL
 
+#extension GL_ARB_gpu_shader_int64 : require
+
 // ============================================================================
 // Parallel GPU Mesh Decimation — Shared Definitions
 // ============================================================================
@@ -33,6 +35,7 @@
 struct Vertex {
     vec3 pos;
     vec3 normal;
+    vec2 texCoord;
 };
 
 // Symmetric 4x4 quadric stored as 10 floats:
@@ -148,7 +151,9 @@ bool quadric_optimal(Quadric qr, out vec3 result) {
 
     float det = a00 * c00 + a01 * c01 + a02 * c02;
 
-    if (abs(det) < 1e-10) {
+    // Scale-relative threshold: reject if det is tiny relative to matrix diagonal
+    float scale = max(abs(a00), max(abs(a11), abs(a22)));
+    if (abs(det) < 1e-6 * scale * scale * scale + 1e-20) {
         return false;
     }
 

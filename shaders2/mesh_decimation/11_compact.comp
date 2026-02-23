@@ -13,9 +13,10 @@
 // Removes degenerate triangles by compacting alive triangles into a
 // contiguous output buffer. Uses a two-level approach:
 //   1. Subgroup ballot counts alive threads and assigns local indices
-//   2. Subgroup leaders do a workgroup-level prefix sum via shared memory
-//   3. One thread per workgroup reserves a global output block via atomicAdd
-//   4. Alive threads scatter their triangle data to the output
+//   2. Subgroup leaders write counts to shared memory
+//   3. Thread 0 computes a sequential prefix sum over all subgroup counts
+//   4. One thread per workgroup reserves a global output block via atomicAdd
+//   5. Alive threads scatter their triangle data to the output
 //
 // Output is written to scanData[] (repurposed as temp storage).
 // Pass 12 copies the result back to indices[]/posIndices[].
@@ -34,8 +35,9 @@
 
 layout(local_size_x = WORKGROUP_SIZE) in;
 
-shared uint sgCounts[WORKGROUP_SIZE / 32 + 1];  // per-subgroup alive counts
-shared uint sgOffsets[WORKGROUP_SIZE / 32 + 1]; // per-subgroup exclusive prefix
+// Sized for worst-case subgroup size (4), giving up to 64 subgroups
+shared uint sgCounts[WORKGROUP_SIZE / 4 + 1];
+shared uint sgOffsets[WORKGROUP_SIZE / 4 + 1];
 shared uint wgOutputBase;
 shared uint wgTotal;
 
@@ -61,17 +63,16 @@ void main() {
     }
     barrier();
 
-    // Step 3: First subgroup computes exclusive prefix sum of subgroup counts
+    // Step 3: Thread 0 computes sequential prefix sum over all subgroup counts
     uint numSubgroups = (WORKGROUP_SIZE + gl_SubgroupSize - 1u) / gl_SubgroupSize;
-    if (subgroupIdx == 0u && gl_SubgroupInvocationID < numSubgroups) {
-        uint val = sgCounts[gl_SubgroupInvocationID];
-        uint prefix = subgroupExclusiveAdd(val);
-        sgOffsets[gl_SubgroupInvocationID] = prefix;
-
-        // Last participating lane writes the workgroup total
-        if (gl_SubgroupInvocationID == numSubgroups - 1u) {
-            wgTotal = prefix + val;
+    if (lid == 0u) {
+        uint running = 0u;
+        for (uint i = 0u; i < numSubgroups; i++) {
+            uint c = sgCounts[i];
+            sgOffsets[i] = running;
+            running += c;
         }
+        wgTotal = running;
     }
     barrier();
 

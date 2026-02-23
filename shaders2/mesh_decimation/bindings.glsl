@@ -5,10 +5,10 @@
 // Shared SSBO Bindings for Mesh Decimation Pipeline
 // ============================================================================
 
-// B0: Vertex data (position + normal interleaved as 2x vec4 per vertex)
-// Layout: [pos.x, pos.y, pos.z, 0, norm.x, norm.y, norm.z, 0] per vertex
+// B0: Vertex data (position + normal + texcoord interleaved as 3x vec4 per vertex)
+// Layout: [pos.x, pos.y, pos.z, 0, norm.x, norm.y, norm.z, 0, uv.x, uv.y, 0, 0] per vertex
 layout(set = 0, binding = 0) buffer VertexBuffer {
-    vec4 vertexData[];   // 2 vec4s per vertex: [0]=pos, [1]=normal
+    vec4 vertexData[];   // 3 vec4s per vertex: [0]=pos, [1]=normal, [2]=texcoord
 };
 
 // B1: Index buffer — 3 uints per triangle
@@ -68,9 +68,9 @@ layout(set = 0, binding = 11) buffer EdgeFlagBuffer {
     uint edgeFlags[];
 };
 
-// B12: Per-edge optimal collapse target position (packed as 2x vec4)
+// B12: Per-edge optimal collapse target (packed as 3x vec4)
 layout(set = 0, binding = 12) buffer EdgeTargetBuffer {
-    vec4 edgeTarget[];   // [edgeIdx*2+0]=pos, [edgeIdx*2+1]=normal
+    vec4 edgeTarget[];   // [edgeIdx*3+0]=pos, [edgeIdx*3+1]=normal, [edgeIdx*3+2]=texcoord
 };
 
 // B13: Per-triangle 64-bit edge descriptor for atomic-min race
@@ -127,14 +127,16 @@ layout(push_constant) uniform PushConstants {
 
 Vertex loadVertex(uint idx) {
     Vertex v;
-    v.pos    = vertexData[idx * 2 + 0].xyz;
-    v.normal = vertexData[idx * 2 + 1].xyz;
+    v.pos      = vertexData[idx * 3 + 0].xyz;
+    v.normal   = vertexData[idx * 3 + 1].xyz;
+    v.texCoord = vertexData[idx * 3 + 2].xy;
     return v;
 }
 
 void storeVertex(uint idx, Vertex v) {
-    vertexData[idx * 2 + 0] = vec4(v.pos, 0.0);
-    vertexData[idx * 2 + 1] = vec4(v.normal, 0.0);
+    vertexData[idx * 3 + 0] = vec4(v.pos, 0.0);
+    vertexData[idx * 3 + 1] = vec4(v.normal, 0.0);
+    vertexData[idx * 3 + 2] = vec4(v.texCoord, 0.0, 0.0);
 }
 
 // ============================================================================

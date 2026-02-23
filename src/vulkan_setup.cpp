@@ -33,6 +33,9 @@ void App::initVulkan() {
     createDescriptorPool();
     createComputeDescriptorSetLayout();
     createComputePipeline();
+    createDecimationDescriptorSetLayouts();
+    createDecimationPipelineLayout();
+    createDecimationPipelines();
     createDepthResources();
     createFramebuffers();
     createTextureImage();
@@ -108,6 +111,7 @@ void App::cleanup() {
 
     vkDestroyPipeline(device, computePipeline, nullptr);
     vkDestroyPipelineLayout(device, computePipelineLayout, nullptr);
+    cleanupDecimation();
 
     vkDestroyDescriptorPool(device, descriptorPool, nullptr);
 
@@ -279,6 +283,16 @@ void App::createLogicalDevice() {
 
     VkPhysicalDeviceFeatures deviceFeatures{};
     deviceFeatures.samplerAnisotropy = VK_TRUE;
+    deviceFeatures.shaderInt64 = VK_TRUE;
+
+    VkPhysicalDeviceShaderAtomicInt64Features atomicInt64Features{};
+    atomicInt64Features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_ATOMIC_INT64_FEATURES;
+    atomicInt64Features.shaderBufferInt64Atomics = VK_TRUE;
+
+    VkPhysicalDeviceFeatures2 features2{};
+    features2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+    features2.features = deviceFeatures;
+    features2.pNext = &atomicInt64Features;
 
     VkDeviceCreateInfo createInfo{};
     createInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
@@ -286,7 +300,8 @@ void App::createLogicalDevice() {
     createInfo.queueCreateInfoCount = static_cast<uint32_t>(queueCreateInfos.size());
     createInfo.pQueueCreateInfos = queueCreateInfos.data();
 
-    createInfo.pEnabledFeatures = &deviceFeatures;
+    createInfo.pNext = &features2;
+    createInfo.pEnabledFeatures = nullptr;
 
 #ifdef WSL_COMPAT
     std::vector<const char*> enabledExtensions(deviceExtensions.begin(), deviceExtensions.end());
@@ -840,13 +855,13 @@ void App::createDescriptorPool() {
     poolSizes[1].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     poolSizes[1].descriptorCount = static_cast<uint32_t>(MAX_FRAMES_IN_FLIGHT);
     poolSizes[2].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    poolSizes[2].descriptorCount = 32;
+    poolSizes[2].descriptorCount = 64;
 
     VkDescriptorPoolCreateInfo poolInfo{};
     poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
     poolInfo.poolSizeCount = static_cast<uint32_t>(poolSizes.size());
     poolInfo.pPoolSizes = poolSizes.data();
-    poolInfo.maxSets = static_cast<uint32_t>(MAX_FRAMES_IN_FLIGHT) + 1;
+    poolInfo.maxSets = static_cast<uint32_t>(MAX_FRAMES_IN_FLIGHT) + 3;
 
     if (vkCreateDescriptorPool(device, &poolInfo, nullptr, &descriptorPool) != VK_SUCCESS) {
         throw std::runtime_error("failed to create descriptor pool!");

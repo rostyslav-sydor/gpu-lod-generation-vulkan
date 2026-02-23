@@ -73,12 +73,11 @@ void insertEdge(uint v0, uint v1, uint triIdx, uint localEdge) {
         if (hashMapData[s].x == key_high && hashMapData[s].y == key_low) {
             uint edgeIdx = hashMapData[s].z;
 
-            // Spin until edgeIdx is written (it might not be visible yet)
-            while (edgeIdx == 0u && hashMapData[s].z == 0u && prev == key_high) {
+            // Spin until edgeIdx is written — .z starts as HASHMAP_EMPTY (0xFFFFFFFF)
+            while (edgeIdx == HASHMAP_EMPTY) {
                 memoryBarrierBuffer();
                 edgeIdx = hashMapData[s].z;
             }
-            edgeIdx = hashMapData[s].z;
 
             // Record second adjacent triangle (manifold: at most 2)
             atomicCompSwap(edgeTriangles[edgeIdx * 2u + 1u], NONE, triIdx);

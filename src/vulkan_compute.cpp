@@ -280,6 +280,208 @@ void App::createComputeCommandBuffer() {
     }
 }
 
+// ============================================================================
+// Decimation pipeline infrastructure
+// ============================================================================
+
+void App::createDecimationDescriptorSetLayouts() {
+    // Set 0: 16 storage buffer bindings (bindings 0-15)
+    std::array<VkDescriptorSetLayoutBinding, 16> set0Bindings{};
+    for (uint32_t i = 0; i < 16; i++) {
+        set0Bindings[i].binding = i;
+        set0Bindings[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        set0Bindings[i].descriptorCount = 1;
+        set0Bindings[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    }
+
+    VkDescriptorSetLayoutCreateInfo layoutInfo0{};
+    layoutInfo0.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+    layoutInfo0.bindingCount = set0Bindings.size();
+    layoutInfo0.pBindings = set0Bindings.data();
+
+    if (vkCreateDescriptorSetLayout(device, &layoutInfo0, nullptr, &decimationDescSetLayout0) != VK_SUCCESS) {
+        throw std::runtime_error("failed to create decimation descriptor set layout 0!");
+    }
+
+    // Set 1: 4 storage buffer bindings (bindings 0-3)
+    std::array<VkDescriptorSetLayoutBinding, 4> set1Bindings{};
+    for (uint32_t i = 0; i < 4; i++) {
+        set1Bindings[i].binding = i;
+        set1Bindings[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        set1Bindings[i].descriptorCount = 1;
+        set1Bindings[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    }
+
+    VkDescriptorSetLayoutCreateInfo layoutInfo1{};
+    layoutInfo1.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+    layoutInfo1.bindingCount = set1Bindings.size();
+    layoutInfo1.pBindings = set1Bindings.data();
+
+    if (vkCreateDescriptorSetLayout(device, &layoutInfo1, nullptr, &decimationDescSetLayout1) != VK_SUCCESS) {
+        throw std::runtime_error("failed to create decimation descriptor set layout 1!");
+    }
+}
+
+void App::createDecimationPipelineLayout() {
+    VkDescriptorSetLayout setLayouts[] = { decimationDescSetLayout0, decimationDescSetLayout1 };
+
+    VkPushConstantRange pushRange{};
+    pushRange.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    pushRange.offset = 0;
+    pushRange.size = sizeof(DecimationPushConstants);
+
+    VkPipelineLayoutCreateInfo layoutInfo{};
+    layoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+    layoutInfo.setLayoutCount = 2;
+    layoutInfo.pSetLayouts = setLayouts;
+    layoutInfo.pushConstantRangeCount = 1;
+    layoutInfo.pPushConstantRanges = &pushRange;
+
+    if (vkCreatePipelineLayout(device, &layoutInfo, nullptr, &decimationPipelineLayout) != VK_SUCCESS) {
+        throw std::runtime_error("failed to create decimation pipeline layout!");
+    }
+}
+
+void App::createDecimationPipelines() {
+    const std::string shaderDir = "shaders2/mesh_decimation/";
+    const std::string shaderNames[DECIMATION_PASS_COUNT] = {
+        "01_hash_vertices", "02_dedup_indices", "03_build_adjacency",
+        "04_build_edges", "05_compute_quadrics", "06_compute_edge_cost",
+        "07_init_descriptors", "08_scatter_descriptors", "09_collapse_edges",
+        "10_mark_degenerate", "11_compact", "12_copy_back"
+    };
+
+    for (uint32_t i = 0; i < DECIMATION_PASS_COUNT; i++) {
+        auto code = readFile(shaderDir + shaderNames[i] + ".spv");
+        VkShaderModule shaderModule = createShaderModule(code);
+
+        VkPipelineShaderStageCreateInfo stageInfo{};
+        stageInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        stageInfo.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+        stageInfo.module = shaderModule;
+        stageInfo.pName = "main";
+
+        VkComputePipelineCreateInfo pipelineInfo{};
+        pipelineInfo.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+        pipelineInfo.layout = decimationPipelineLayout;
+        pipelineInfo.stage = stageInfo;
+
+        if (vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &decimationPipelines[i]) != VK_SUCCESS) {
+            throw std::runtime_error("failed to create decimation pipeline " + shaderNames[i]);
+        }
+
+        vkDestroyShaderModule(device, shaderModule, nullptr);
+    }
+}
+
+static uint32_t nextPowerOf2(uint32_t v) {
+    v--;
+    v |= v >> 1; v |= v >> 2; v |= v >> 4; v |= v >> 8; v |= v >> 16;
+    v++;
+    return v;
+}
+
+void App::allocateDecimationBuffers(uint32_t vertCount, uint32_t triCount) {
+    uint32_t maxEdges = triCount * 3;
+    uint32_t hashMapSize = nextPowerOf2(std::max(vertCount, maxEdges) * 2);
+
+    decimationBufSizes[DB_VERTEX]         = (VkDeviceSize)vertCount * 3 * sizeof(float) * 4;
+    decimationBufSizes[DB_INDEX]          = (VkDeviceSize)triCount * 3 * sizeof(uint32_t);
+    decimationBufSizes[DB_POS_INDEX]      = (VkDeviceSize)triCount * 3 * sizeof(uint32_t);
+    decimationBufSizes[DB_VERTEX_FLAGS]   = (VkDeviceSize)vertCount * sizeof(uint32_t);
+    decimationBufSizes[DB_ADJ_HEAD]       = (VkDeviceSize)vertCount * sizeof(uint32_t);
+    decimationBufSizes[DB_TRI_ADJ_NEXT]   = (VkDeviceSize)triCount * 3 * sizeof(uint32_t);
+    decimationBufSizes[DB_EDGE]           = (VkDeviceSize)maxEdges * 2 * sizeof(uint32_t);
+    decimationBufSizes[DB_EDGE_TRI]       = (VkDeviceSize)maxEdges * 2 * sizeof(uint32_t);
+    decimationBufSizes[DB_TRI_EDGE]       = (VkDeviceSize)triCount * 3 * sizeof(uint32_t);
+    decimationBufSizes[DB_QUADRIC]        = (VkDeviceSize)vertCount * 10 * sizeof(int32_t);
+    decimationBufSizes[DB_EDGE_COST]      = (VkDeviceSize)maxEdges * sizeof(float);
+    decimationBufSizes[DB_EDGE_FLAG]      = (VkDeviceSize)maxEdges * sizeof(uint32_t);
+    decimationBufSizes[DB_EDGE_TARGET]    = (VkDeviceSize)maxEdges * 3 * sizeof(float) * 4;
+    decimationBufSizes[DB_TRI_DESCRIPTOR] = (VkDeviceSize)triCount * sizeof(uint64_t);
+    decimationBufSizes[DB_HASHMAP]        = (VkDeviceSize)hashMapSize * 3 * 4 * sizeof(uint32_t);
+    decimationBufSizes[DB_COUNTER]        = 256;
+    decimationBufSizes[DB_VERTEX_MAP]     = (VkDeviceSize)vertCount * sizeof(uint32_t);
+    decimationBufSizes[DB_POS_MAP]        = (VkDeviceSize)vertCount * sizeof(uint32_t);
+    decimationBufSizes[DB_SCAN]           = (VkDeviceSize)triCount * 6 * sizeof(uint32_t);
+    decimationBufSizes[DB_ALIVE]          = (VkDeviceSize)triCount * sizeof(uint32_t);
+
+    for (int i = 0; i < DB_COUNT; i++) {
+        if (decimationBufSizes[i] == 0) decimationBufSizes[i] = 4;
+        createBuffer(decimationBufSizes[i],
+            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+            decimationBufs[i], decimationMem[i]);
+    }
+}
+
+void App::writeDecimationDescriptorSets() {
+    VkDescriptorSetLayout layouts[] = { decimationDescSetLayout0, decimationDescSetLayout1 };
+    VkDescriptorSet sets[2];
+
+    VkDescriptorSetAllocateInfo allocInfo{};
+    allocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+    allocInfo.descriptorPool = descriptorPool;
+    allocInfo.descriptorSetCount = 2;
+    allocInfo.pSetLayouts = layouts;
+
+    if (vkAllocateDescriptorSets(device, &allocInfo, sets) != VK_SUCCESS) {
+        throw std::runtime_error("failed to allocate decimation descriptor sets!");
+    }
+    decimationDescSet0 = sets[0];
+    decimationDescSet1 = sets[1];
+
+    // Set 0: bindings 0-15 map to DB_VERTEX..DB_COUNTER
+    std::array<VkWriteDescriptorSet, 20> writes{};
+    std::array<VkDescriptorBufferInfo, 20> bufInfos{};
+
+    for (int i = 0; i < 16; i++) {
+        bufInfos[i] = { decimationBufs[i], 0, VK_WHOLE_SIZE };
+        writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        writes[i].dstSet = decimationDescSet0;
+        writes[i].dstBinding = i;
+        writes[i].dstArrayElement = 0;
+        writes[i].descriptorCount = 1;
+        writes[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        writes[i].pBufferInfo = &bufInfos[i];
+    }
+
+    // Set 1: bindings 0-3 map to DB_VERTEX_MAP..DB_ALIVE
+    for (int i = 0; i < 4; i++) {
+        int dbIdx = DB_VERTEX_MAP + i;
+        bufInfos[16 + i] = { decimationBufs[dbIdx], 0, VK_WHOLE_SIZE };
+        writes[16 + i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        writes[16 + i].dstSet = decimationDescSet1;
+        writes[16 + i].dstBinding = i;
+        writes[16 + i].dstArrayElement = 0;
+        writes[16 + i].descriptorCount = 1;
+        writes[16 + i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        writes[16 + i].pBufferInfo = &bufInfos[16 + i];
+    }
+
+    vkUpdateDescriptorSets(device, 20, writes.data(), 0, nullptr);
+}
+
+void App::cleanupDecimation() {
+    for (uint32_t i = 0; i < DECIMATION_PASS_COUNT; i++) {
+        if (decimationPipelines[i] != VK_NULL_HANDLE)
+            vkDestroyPipeline(device, decimationPipelines[i], nullptr);
+    }
+    if (decimationPipelineLayout != VK_NULL_HANDLE)
+        vkDestroyPipelineLayout(device, decimationPipelineLayout, nullptr);
+    if (decimationDescSetLayout0 != VK_NULL_HANDLE)
+        vkDestroyDescriptorSetLayout(device, decimationDescSetLayout0, nullptr);
+    if (decimationDescSetLayout1 != VK_NULL_HANDLE)
+        vkDestroyDescriptorSetLayout(device, decimationDescSetLayout1, nullptr);
+
+    for (int i = 0; i < DB_COUNT; i++) {
+        if (decimationBufs[i] != VK_NULL_HANDLE)
+            vkDestroyBuffer(device, decimationBufs[i], nullptr);
+        if (decimationMem[i] != VK_NULL_HANDLE)
+            vkFreeMemory(device, decimationMem[i], nullptr);
+    }
+}
+
 void App::recordComputeCommandBuffer(VkCommandBuffer commandBuffer, int workgroupsCount) {
     VkCommandBufferBeginInfo beginInfo{};
     beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;

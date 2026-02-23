@@ -53,12 +53,49 @@ const std::string MODEL_PATH = "scene.gltf";
 const std::string TEXTURE_PATH = "bunny.png";
 
 const bool simplify = false;
+inline bool useGPUDecimation = true;
+inline float decimationCostThreshold = std::getenv("DECIM_COST") ? std::stof(std::getenv("DECIM_COST")) : 0.01f;
+inline float decimationTargetRatio = std::getenv("DECIM_RATIO") ? std::stof(std::getenv("DECIM_RATIO")) : 0.1f;
+inline uint32_t maxDecimationIterations = std::getenv("DECIM_NUM") ? std::stoi(std::getenv("DECIM_NUM")) : 100;
 
 const bool deviceLocalBuffer = false;
 const bool singleBuffer = false;
 const bool separateQueueFamily = false;
 
 const bool enableValidationLayers = false;
+
+struct DecimationPushConstants {
+    uint32_t vertexCount;
+    uint32_t triangleCount;
+    uint32_t edgeCount;
+    uint32_t hashMapSize;
+    float costThreshold;
+    uint32_t iteration;
+};
+
+enum DecimationBuffer {
+    DB_VERTEX = 0,
+    DB_INDEX,
+    DB_POS_INDEX,
+    DB_VERTEX_FLAGS,
+    DB_ADJ_HEAD,
+    DB_TRI_ADJ_NEXT,
+    DB_EDGE,
+    DB_EDGE_TRI,
+    DB_TRI_EDGE,
+    DB_QUADRIC,
+    DB_EDGE_COST,
+    DB_EDGE_FLAG,
+    DB_EDGE_TARGET,
+    DB_TRI_DESCRIPTOR,
+    DB_HASHMAP,
+    DB_COUNTER,
+    DB_VERTEX_MAP,
+    DB_POS_MAP,
+    DB_SCAN,
+    DB_ALIVE,
+    DB_COUNT
+};
 
 const int MAX_FRAMES_IN_FLIGHT = 2;
 
@@ -69,6 +106,7 @@ const std::vector<const char*> validationLayers = {
 #ifdef WSL_COMPAT
 const std::vector<const char*> deviceExtensions = {
     VK_KHR_SWAPCHAIN_EXTENSION_NAME,
+    VK_KHR_SHADER_ATOMIC_INT64_EXTENSION_NAME,
 };
 const std::vector<const char*> optionalDeviceExtensions = {
     VK_KHR_SHADER_NON_SEMANTIC_INFO_EXTENSION_NAME
@@ -76,7 +114,8 @@ const std::vector<const char*> optionalDeviceExtensions = {
 #else
 const std::vector<const char*> deviceExtensions = {
     VK_KHR_SWAPCHAIN_EXTENSION_NAME,
-    VK_KHR_SHADER_NON_SEMANTIC_INFO_EXTENSION_NAME
+    VK_KHR_SHADER_NON_SEMANTIC_INFO_EXTENSION_NAME,
+    VK_KHR_SHADER_ATOMIC_INT64_EXTENSION_NAME,
 };
 const std::vector<const char*> optionalDeviceExtensions = {};
 #endif
@@ -195,6 +234,18 @@ private:
 
     VkSemaphore computeFinishedSemaphore;
     VkFence computeFence;
+
+    static constexpr uint32_t DECIMATION_PASS_COUNT = 12;
+    VkPipeline decimationPipelines[DECIMATION_PASS_COUNT] = {};
+    VkPipelineLayout decimationPipelineLayout = VK_NULL_HANDLE;
+    VkDescriptorSetLayout decimationDescSetLayout0 = VK_NULL_HANDLE;
+    VkDescriptorSetLayout decimationDescSetLayout1 = VK_NULL_HANDLE;
+    VkDescriptorSet decimationDescSet0 = VK_NULL_HANDLE;
+    VkDescriptorSet decimationDescSet1 = VK_NULL_HANDLE;
+
+    VkBuffer decimationBufs[DB_COUNT] = {};
+    VkDeviceMemory decimationMem[DB_COUNT] = {};
+    VkDeviceSize decimationBufSizes[DB_COUNT] = {};
 
     bool framebufferResized = false;
 
@@ -315,6 +366,14 @@ private:
 
     void loadModel();
     void simplifyMesh();
+
+    void createDecimationDescriptorSetLayouts();
+    void createDecimationPipelineLayout();
+    void createDecimationPipelines();
+    void allocateDecimationBuffers(uint32_t vertexCount, uint32_t triangleCount);
+    void writeDecimationDescriptorSets();
+    void runDecimation();
+    void cleanupDecimation();
 
     void splitMesh(std::vector<meshopt_Meshlet>& meshlets,
         std::vector<uint32_t>& meshletVertices, std::vector<Triangle>& meshletTriangles);
