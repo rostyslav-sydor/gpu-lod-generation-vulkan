@@ -5,7 +5,7 @@ void App::loadModel() {
     indices.clear();
     Timer tWhole;
     Assimp::Importer importer;
-    const aiScene* scene = importer.ReadFile(MODEL_PATH,
+    const aiScene* scene = importer.ReadFile(modelPath,
         aiProcess_Triangulate |
         aiProcess_JoinIdenticalVertices);
 
@@ -47,13 +47,51 @@ void App::loadModel() {
     std::cout << "verts and inds before simplification: " << vertices.size() << ' ' << indices.size() << '\n';
     timesLoad.push_back(tWhole.getTime());
 
+    meshSnapshots[RENDER_ORIGINAL].verts = vertices;
+    meshSnapshots[RENDER_ORIGINAL].inds = indices;
+    meshSnapshots[RENDER_ORIGINAL].valid = true;
+
     Timer tAlgo;
-    if (simplify)
+
+    if (simplify) {
         simplifyMesh();
-    else if (useGPUDecimation)
-        runDecimation();
+    } else {
+        if (useGPUDecimation) {
+            Timer tGPU;
+            runDecimation();
+            long long gpuTime = tGPU.getTime();
+            meshSnapshots[RENDER_GPU].verts = vertices;
+            meshSnapshots[RENDER_GPU].inds = indices;
+            meshSnapshots[RENDER_GPU].valid = true;
+            std::cout << "GPU Decimation: " << meshSnapshots[RENDER_ORIGINAL].inds.size()/3
+                      << " -> " << indices.size()/3
+                      << " triangles (" << gpuTime << " us)\n";
+        }
+
+        if (useCPUDecimation) {
+            vertices = meshSnapshots[RENDER_ORIGINAL].verts;
+            indices = meshSnapshots[RENDER_ORIGINAL].inds;
+            runCPUDecimation();
+            meshSnapshots[RENDER_CPU].verts = vertices;
+            meshSnapshots[RENDER_CPU].inds = indices;
+            meshSnapshots[RENDER_CPU].valid = true;
+        }
+    }
+
     timesAlgo.push_back(tAlgo.getTime());
-    
+
+    if (meshSnapshots[RENDER_GPU].valid)
+        activeRenderMode = RENDER_GPU;
+    else if (meshSnapshots[RENDER_CPU].valid)
+        activeRenderMode = RENDER_CPU;
+    else
+        activeRenderMode = RENDER_ORIGINAL;
+
+    vertices = meshSnapshots[activeRenderMode].verts;
+    indices = meshSnapshots[activeRenderMode].inds;
+
+    printDecimationMetrics();
+
     timesWhole.push_back(tWhole.getTime());
 }
 
@@ -265,6 +303,290 @@ void App::simplifyMesh() {
 }
 
 // ============================================================================
+// CPU Mesh Decimation (meshoptimizer baseline)
+// ============================================================================
+
+void App::runCPUDecimation() {
+    uint32_t vertCount = static_cast<uint32_t>(vertices.size());
+    uint32_t triCount = static_cast<uint32_t>(indices.size() / 3);
+    size_t targetIndexCount = std::max((size_t)3, (size_t)(triCount * decimationTargetRatio) * 3);
+
+    std::vector<uint32_t> result(indices.size());
+    float resultError = 0.0f;
+
+    Timer t;
+    size_t newIndexCount = meshopt_simplify(
+        result.data(), indices.data(), indices.size(),
+        &vertices[0].pos.x, vertCount, sizeof(Vertex),
+        targetIndexCount, std::numeric_limits<float>::max(),
+        0, &resultError);
+    long long elapsed = t.getTime();
+
+    result.resize(newIndexCount);
+    indices = std::move(result);
+
+    uint32_t newTriCount = static_cast<uint32_t>(indices.size() / 3);
+
+    for (uint32_t i = 0; i < vertCount; i++)
+        vertices[i].normal = {0.0f, 0.0f, 0.0f};
+    for (uint32_t ti = 0; ti < newTriCount; ti++) {
+        uint32_t i0 = indices[ti * 3 + 0], i1 = indices[ti * 3 + 1], i2 = indices[ti * 3 + 2];
+        if (i0 >= vertCount || i1 >= vertCount || i2 >= vertCount) continue;
+        glm::vec3 fn = glm::cross(vertices[i1].pos - vertices[i0].pos,
+                                   vertices[i2].pos - vertices[i0].pos);
+        vertices[i0].normal += fn;
+        vertices[i1].normal += fn;
+        vertices[i2].normal += fn;
+    }
+    for (uint32_t i = 0; i < vertCount; i++) {
+        float len = glm::length(vertices[i].normal);
+        if (len > 1e-8f) vertices[i].normal /= len;
+    }
+
+    std::cout << "CPU Decimation (meshoptimizer): " << triCount << " -> " << newTriCount
+              << " triangles (" << elapsed << " us)\n";
+}
+
+// ============================================================================
+// Mesh Quality Metrics
+// ============================================================================
+
+static float pointToTriDist(glm::vec3 p, glm::vec3 a, glm::vec3 b, glm::vec3 c) {
+    glm::vec3 ab = b - a, ac = c - a, ap = p - a;
+    float d1 = glm::dot(ab, ap), d2 = glm::dot(ac, ap);
+    if (d1 <= 0 && d2 <= 0) return glm::length(p - a);
+
+    glm::vec3 bp = p - b;
+    float d3 = glm::dot(ab, bp), d4 = glm::dot(ac, bp);
+    if (d3 >= 0 && d4 <= d3) return glm::length(p - b);
+
+    float vc = d1 * d4 - d3 * d2;
+    if (vc <= 0 && d1 >= 0 && d3 <= 0) {
+        float v = d1 / (d1 - d3);
+        return glm::length(p - (a + v * ab));
+    }
+
+    glm::vec3 cp = p - c;
+    float d5 = glm::dot(ab, cp), d6 = glm::dot(ac, cp);
+    if (d6 >= 0 && d5 <= d6) return glm::length(p - c);
+
+    float vb = d5 * d2 - d1 * d6;
+    if (vb <= 0 && d2 >= 0 && d6 <= 0) {
+        float w = d2 / (d2 - d6);
+        return glm::length(p - (a + w * ac));
+    }
+
+    float va = d3 * d6 - d5 * d4;
+    if (va <= 0 && (d4 - d3) >= 0 && (d5 - d6) >= 0) {
+        float w = (d4 - d3) / ((d4 - d3) + (d5 - d6));
+        return glm::length(p - (b + w * (c - b)));
+    }
+
+    float denom = 1.0f / (va + vb + vc);
+    float v = vb * denom, w = vc * denom;
+    return glm::length(p - (a + v * ab + w * ac));
+}
+
+static float triAngle(glm::vec3 a, glm::vec3 b, glm::vec3 c) {
+    glm::vec3 ab = glm::normalize(b - a);
+    glm::vec3 ac = glm::normalize(c - a);
+    return glm::degrees(std::acos(glm::clamp(glm::dot(ab, ac), -1.0f, 1.0f)));
+}
+
+static float triAspectRatio(glm::vec3 a, glm::vec3 b, glm::vec3 c) {
+    float lab = glm::length(b - a);
+    float lbc = glm::length(c - b);
+    float lca = glm::length(a - c);
+    float longest = std::max({lab, lbc, lca});
+    float area = glm::length(glm::cross(b - a, c - a)) * 0.5f;
+    if (area < 1e-12f) return 1e6f;
+    float altitude = 2.0f * area / longest;
+    return longest / altitude;
+}
+
+struct MeshMetrics {
+    uint32_t triCount = 0;
+    float reductionRatio = 1.0f;
+    float minAngleDeg = 0.0f;
+    float avgMinAngleDeg = 0.0f;
+    float maxAspectRatio = 0.0f;
+    float avgAspectRatio = 0.0f;
+    float hausdorffDist = 0.0f;
+    float avgVertDist = 0.0f;
+    float avgNormalDevDeg = 0.0f;
+};
+
+static MeshMetrics computeMetrics(
+    const std::vector<Vertex>& verts,
+    const std::vector<uint32_t>& inds,
+    uint32_t originalTriCount,
+    const std::vector<Vertex>* origVerts,
+    const std::vector<uint32_t>* origInds)
+{
+    MeshMetrics m;
+    m.triCount = static_cast<uint32_t>(inds.size() / 3);
+    m.reductionRatio = (originalTriCount > 0) ? (float)m.triCount / originalTriCount : 1.0f;
+
+    float sumMinAngle = 0.0f, sumAspect = 0.0f;
+    m.minAngleDeg = 180.0f;
+    m.maxAspectRatio = 0.0f;
+
+    for (uint32_t t = 0; t < m.triCount; t++) {
+        uint32_t i0 = inds[t*3+0], i1 = inds[t*3+1], i2 = inds[t*3+2];
+        if (i0 >= verts.size() || i1 >= verts.size() || i2 >= verts.size()) continue;
+        glm::vec3 a = verts[i0].pos, b = verts[i1].pos, c = verts[i2].pos;
+
+        float a0 = triAngle(a, b, c);
+        float a1 = triAngle(b, c, a);
+        float a2 = triAngle(c, a, b);
+        float minA = std::min({a0, a1, a2});
+        m.minAngleDeg = std::min(m.minAngleDeg, minA);
+        sumMinAngle += minA;
+
+        float ar = triAspectRatio(a, b, c);
+        m.maxAspectRatio = std::max(m.maxAspectRatio, ar);
+        sumAspect += ar;
+    }
+    if (m.triCount > 0) {
+        m.avgMinAngleDeg = sumMinAngle / m.triCount;
+        m.avgAspectRatio = sumAspect / m.triCount;
+    }
+
+    if (origVerts && origInds && !origInds->empty()) {
+        uint32_t origTriCount = static_cast<uint32_t>(origInds->size() / 3);
+
+        const uint32_t MAX_ORIG_TRIS_FOR_METRICS = 10000;
+        uint32_t stride = 1;
+        uint32_t sampledOrigTriCount = origTriCount;
+        if (origTriCount > MAX_ORIG_TRIS_FOR_METRICS) {
+            stride = (origTriCount + MAX_ORIG_TRIS_FOR_METRICS - 1) / MAX_ORIG_TRIS_FOR_METRICS;
+            sampledOrigTriCount = (origTriCount + stride - 1) / stride;
+        }
+
+        std::unordered_set<uint32_t> usedVerts(inds.begin(), inds.end());
+        float maxDist = 0.0f, sumDist = 0.0f;
+        uint32_t distCount = 0;
+        for (uint32_t vi : usedVerts) {
+            if (vi >= verts.size()) continue;
+            glm::vec3 p = verts[vi].pos;
+            float bestDist = std::numeric_limits<float>::max();
+            for (uint32_t t = 0; t < origTriCount; t += stride) {
+                glm::vec3 oa = (*origVerts)[(*origInds)[t*3+0]].pos;
+                glm::vec3 ob = (*origVerts)[(*origInds)[t*3+1]].pos;
+                glm::vec3 oc = (*origVerts)[(*origInds)[t*3+2]].pos;
+                bestDist = std::min(bestDist, pointToTriDist(p, oa, ob, oc));
+            }
+            maxDist = std::max(maxDist, bestDist);
+            sumDist += bestDist;
+            distCount++;
+        }
+        m.hausdorffDist = maxDist;
+        m.avgVertDist = (distCount > 0) ? sumDist / distCount : 0.0f;
+
+        float sumNormalDev = 0.0f;
+        uint32_t normalCount = 0;
+        for (uint32_t t = 0; t < m.triCount; t++) {
+            uint32_t i0 = inds[t*3+0], i1 = inds[t*3+1], i2 = inds[t*3+2];
+            if (i0 >= verts.size() || i1 >= verts.size() || i2 >= verts.size()) continue;
+            glm::vec3 fn = glm::cross(verts[i1].pos - verts[i0].pos,
+                                       verts[i2].pos - verts[i0].pos);
+            if (glm::length(fn) < 1e-12f) continue;
+            fn = glm::normalize(fn);
+            glm::vec3 centroid = (verts[i0].pos + verts[i1].pos + verts[i2].pos) / 3.0f;
+
+            float bestDistSq = std::numeric_limits<float>::max();
+            glm::vec3 bestNormal(0,0,1);
+            for (uint32_t ot = 0; ot < origTriCount; ot += stride) {
+                glm::vec3 oa = (*origVerts)[(*origInds)[ot*3+0]].pos;
+                glm::vec3 ob = (*origVerts)[(*origInds)[ot*3+1]].pos;
+                glm::vec3 oc = (*origVerts)[(*origInds)[ot*3+2]].pos;
+                glm::vec3 oCentroid = (oa + ob + oc) / 3.0f;
+                float distSq = glm::dot(oCentroid - centroid, oCentroid - centroid);
+                if (distSq < bestDistSq) {
+                    bestDistSq = distSq;
+                    glm::vec3 ofn = glm::cross(ob - oa, oc - oa);
+                    if (glm::length(ofn) > 1e-12f) bestNormal = glm::normalize(ofn);
+                }
+            }
+            float cosA = glm::clamp(glm::dot(fn, bestNormal), -1.0f, 1.0f);
+            sumNormalDev += glm::degrees(std::acos(cosA));
+            normalCount++;
+        }
+        m.avgNormalDevDeg = (normalCount > 0) ? sumNormalDev / normalCount : 0.0f;
+
+        if (stride > 1) {
+            std::cout << "  (metrics sampled 1/" << stride
+                      << " of original triangles for speed)" << std::endl;
+        }
+    }
+
+    return m;
+}
+
+void App::printDecimationMetrics() {
+    auto& orig = meshSnapshots[RENDER_ORIGINAL];
+    if (!orig.valid) return;
+
+    uint32_t origTriCount = static_cast<uint32_t>(orig.inds.size() / 3);
+    bool hasGPU = meshSnapshots[RENDER_GPU].valid;
+    bool hasCPU = meshSnapshots[RENDER_CPU].valid;
+    if (!hasGPU && !hasCPU) return;
+
+    std::cout << "Computing metrics for original..." << std::flush;
+    auto origM = computeMetrics(orig.verts, orig.inds, origTriCount, nullptr, nullptr);
+    std::cout << " done" << std::endl;
+
+    MeshMetrics gpuM, cpuM;
+    if (hasGPU) {
+        std::cout << "Computing metrics for GPU mesh..." << std::flush;
+        gpuM = computeMetrics(meshSnapshots[RENDER_GPU].verts, meshSnapshots[RENDER_GPU].inds,
+                              origTriCount, &orig.verts, &orig.inds);
+        std::cout << " done" << std::endl;
+    }
+    if (hasCPU) {
+        std::cout << "Computing metrics for CPU mesh..." << std::flush;
+        cpuM = computeMetrics(meshSnapshots[RENDER_CPU].verts, meshSnapshots[RENDER_CPU].inds,
+                              origTriCount, &orig.verts, &orig.inds);
+        std::cout << " done" << std::endl;
+    }
+
+    auto printRow = [&](const char* label, auto origVal, auto gpuVal, auto cpuVal, const char* fmt) {
+        char buf[256];
+        std::string line;
+        snprintf(buf, sizeof(buf), "  %-24s", label); line += buf;
+        snprintf(buf, sizeof(buf), fmt, origVal); line += buf;
+        if (hasGPU) { snprintf(buf, sizeof(buf), fmt, gpuVal); line += buf; }
+        if (hasCPU) { snprintf(buf, sizeof(buf), fmt, cpuVal); line += buf; }
+        std::cout << line << "\n";
+    };
+
+    std::cout << "\n  === Decimation Quality Comparison ===\n";
+    char hdr[256];
+    snprintf(hdr, sizeof(hdr), "  %-24s%12s", "Metric", "Original");
+    std::string header = hdr;
+    if (hasGPU) header += "         GPU";
+    if (hasCPU) header += "   CPU(mopt)";
+    std::cout << header << "\n";
+    std::cout << "  " << std::string(24 + 12 + (hasGPU ? 12 : 0) + (hasCPU ? 12 : 0), '-') << "\n";
+
+    printRow("Triangles",        origM.triCount,        gpuM.triCount,        cpuM.triCount,        "%12u");
+    printRow("Reduction ratio",  origM.reductionRatio,  gpuM.reductionRatio,  cpuM.reductionRatio,  "%12.4f");
+    printRow("Min angle (deg)",  origM.minAngleDeg,     gpuM.minAngleDeg,     cpuM.minAngleDeg,     "%12.2f");
+    printRow("Avg min angle",    origM.avgMinAngleDeg,  gpuM.avgMinAngleDeg,  cpuM.avgMinAngleDeg,  "%12.2f");
+    printRow("Max aspect ratio", origM.maxAspectRatio,  gpuM.maxAspectRatio,  cpuM.maxAspectRatio,  "%12.2f");
+    printRow("Avg aspect ratio", origM.avgAspectRatio,  gpuM.avgAspectRatio,  cpuM.avgAspectRatio,  "%12.2f");
+    if (hasGPU || hasCPU) {
+        printRow("Hausdorff dist",   0.0f,                  gpuM.hausdorffDist,   cpuM.hausdorffDist,   "%12.4f");
+        printRow("Avg vertex dist",  0.0f,                  gpuM.avgVertDist,     cpuM.avgVertDist,     "%12.4f");
+        printRow("Avg normal dev",   0.0f,                  gpuM.avgNormalDevDeg, cpuM.avgNormalDevDeg, "%12.2f");
+    }
+    std::cout << "\n";
+
+    if (hasGPU || hasCPU)
+        std::cout << "  Keys: [G]PU  [C]PU  [O]riginal\n\n";
+}
+
+// ============================================================================
 // GPU Mesh Decimation Pipeline
 // ============================================================================
 
@@ -280,7 +602,9 @@ void App::runDecimation() {
     auto np2 = [](uint32_t v) { v--; v|=v>>1; v|=v>>2; v|=v>>4; v|=v>>8; v|=v>>16; v++; return v; };
     uint32_t hashMapSize = np2(std::max(vertCount, maxEdges) * 2);
 
-    std::cout << "Decimation: " << vertCount << " vertices, " << triCount << " triangles, hashMap=" << hashMapSize << std::endl;
+    const char* modeNames[] = {"QEM", "Paper (curvature+length+valence)", "Meshopt-like (QEM+borders+reg)"};
+    std::cout << "Decimation: " << vertCount << " vertices, " << triCount << " triangles, hashMap=" << hashMapSize
+              << ", costMode=" << decimationCostMode << " (" << modeNames[std::min(decimationCostMode, 2u)] << ")" << std::endl;
 
     // --- Allocate buffers and descriptors ---
     std::cout << "  allocating buffers..." << std::flush;
@@ -393,8 +717,10 @@ void App::runDecimation() {
     {
         VkCommandBuffer cmd = beginCmd();
 
-        // Clear hashMap (all 3 regions) to HASHMAP_EMPTY
-        vkCmdFillBuffer(cmd, decimationBufs[DB_HASHMAP], 0, decimationBufSizes[DB_HASHMAP], 0xFFFFFFFF);
+        // Clear all 3 hash maps to HASHMAP_EMPTY
+        vkCmdFillBuffer(cmd, decimationBufs[DB_HASHMAP_VERTEX], 0, decimationBufSizes[DB_HASHMAP_VERTEX], 0xFFFFFFFF);
+        vkCmdFillBuffer(cmd, decimationBufs[DB_HASHMAP_POSITION], 0, decimationBufSizes[DB_HASHMAP_POSITION], 0xFFFFFFFF);
+        vkCmdFillBuffer(cmd, decimationBufs[DB_HASHMAP_EDGE], 0, decimationBufSizes[DB_HASHMAP_EDGE], 0xFFFFFFFF);
         // Clear vertex flags
         vkCmdFillBuffer(cmd, decimationBufs[DB_VERTEX_FLAGS], 0, decimationBufSizes[DB_VERTEX_FLAGS], 0);
         // Clear counters
@@ -409,6 +735,7 @@ void App::runDecimation() {
         pc.hashMapSize = hashMapSize;
         pc.costThreshold = decimationCostThreshold;
         pc.iteration = 0;
+        pc.costMode = decimationCostMode;
 
         // Pass 1: Hash Vertices
         dispatchPass(cmd, 0, pc, divUp(vertCount, WORKGROUP_SIZE));
@@ -425,18 +752,19 @@ void App::runDecimation() {
     // ======================================================================
     // Phase 2: Iterative decimation loop (passes 3-12)
     // ======================================================================
-    VkDeviceSize hmRegion2Offset = (VkDeviceSize)hashMapSize * 2 * 16;
-    VkDeviceSize hmRegion2Size   = (VkDeviceSize)hashMapSize * 16;
+    VkDeviceSize edgeHashMapSize = decimationBufSizes[DB_HASHMAP_EDGE];
+
+    long long batchATimeUs = 0, batchBTimeUs = 0;
 
     for (uint32_t iteration = 0; iteration < maxDecimationIterations; iteration++) {
+        Timer iterTimer;
         std::cout << "  iter " << iteration << ": passes 3-4..." << std::flush;
-        // --- Phase A: Passes 3-4 (topology + edge discovery) ---
+        // --- Phase A: Clears + Pass 3 + Pass 4 (one batch) ---
         {
             VkCommandBuffer cmd = beginCmd();
 
-            // Clear buffers for this iteration
             vkCmdFillBuffer(cmd, decimationBufs[DB_ADJ_HEAD], 0, decimationBufSizes[DB_ADJ_HEAD], 0xFFFFFFFF);
-            vkCmdFillBuffer(cmd, decimationBufs[DB_HASHMAP], hmRegion2Offset, hmRegion2Size, 0xFFFFFFFF);
+            vkCmdFillBuffer(cmd, decimationBufs[DB_HASHMAP_EDGE], 0, edgeHashMapSize, 0xFFFFFFFF);
             vkCmdFillBuffer(cmd, decimationBufs[DB_QUADRIC], 0, decimationBufSizes[DB_QUADRIC], 0);
             vkCmdFillBuffer(cmd, decimationBufs[DB_COUNTER], 0, decimationBufSizes[DB_COUNTER], 0);
 
@@ -449,17 +777,16 @@ void App::runDecimation() {
             pc.hashMapSize = hashMapSize;
             pc.costThreshold = decimationCostThreshold;
             pc.iteration = iteration;
+            pc.costMode = decimationCostMode;
 
-            // Pass 3: Build Adjacency
             dispatchPass(cmd, 2, pc, divUp(triCount, WORKGROUP_SIZE));
             computeBarrier(cmd);
-
-            // Pass 4: Build Edges
             dispatchPass(cmd, 3, pc, divUp(triCount, WORKGROUP_SIZE));
             computeBarrier(cmd);
 
             submitAndWait(cmd);
         }
+        batchATimeUs += iterTimer.reset();
         std::cout << " ok, readback..." << std::flush;
 
         // Read back edge count
@@ -473,41 +800,74 @@ void App::runDecimation() {
             pc.triangleCount = triCount;
             pc.edgeCount = edgeCount;
             pc.hashMapSize = hashMapSize;
-            pc.costThreshold = decimationCostThreshold;
+            // Adaptive threshold: starts at base cost and grows exponentially
+            // each iteration, mimicking greedy priority ordering in batches.
+            // Cheap edges collapse first, expensive ones progressively later.
+            float adaptiveCost = decimationCostThreshold * std::pow(decimationGrowthRate, (float)iteration);
+            pc.costThreshold = adaptiveCost;
             pc.iteration = iteration;
+            pc.costMode = decimationCostMode;
 
-            struct { int idx; const char* name; uint32_t count; } passes[] = {
-                {4, "P5:quadrics",  divUp(triCount, WORKGROUP_SIZE)},
-                {5, "P6:edgecost",  divUp(edgeCount, WORKGROUP_SIZE)},
-                {6, "P7:initdesc",  divUp(triCount, WORKGROUP_SIZE)},
-                {7, "P8:scatter",   divUp(edgeCount, WORKGROUP_SIZE)},
-                {8, "P9:collapse",  divUp(edgeCount, WORKGROUP_SIZE)},
-                {9, "P10:degen",    divUp(triCount, WORKGROUP_SIZE)},
-                {10,"P11:compact",  divUp(triCount, WORKGROUP_SIZE)},
-                {11,"P12:copyback", divUp(triCount, WORKGROUP_SIZE)},
+            // --- Phase B: Passes 5-12 (one batch) ---
+            Timer batchBTimer;
+            VkCommandBuffer cmd = beginCmd();
+
+            struct { int idx; uint32_t count; } passes[] = {
+                {4,  divUp(triCount, WORKGROUP_SIZE)},   // P5: quadrics
+                {5,  divUp(edgeCount, WORKGROUP_SIZE)},  // P6: edgecost
+                {6,  divUp(triCount, WORKGROUP_SIZE)},   // P7: initdesc
+                {7,  divUp(edgeCount, WORKGROUP_SIZE)},  // P8: scatter
+                {8,  divUp(edgeCount, WORKGROUP_SIZE)},  // P9: collapse
+                {9,  divUp(triCount, WORKGROUP_SIZE)},   // P10: degen
+                {10, divUp(triCount, WORKGROUP_SIZE)},   // P11: compact
+                {11, divUp(triCount, WORKGROUP_SIZE)},   // P12: copyback
             };
 
             for (auto& p : passes) {
-                std::cout << " " << p.name << std::flush;
-                VkCommandBuffer cmd = beginCmd();
                 dispatchPass(cmd, p.idx, pc, p.count);
                 computeBarrier(cmd);
-                submitAndWait(cmd);
-                std::cout << "+" << std::flush;
             }
+
+            submitAndWait(cmd);
+            batchBTimeUs += batchBTimer.getTime();
+            std::cout << " P5-P12" << std::flush;
         }
 
         uint32_t collapseCount = readCounter(1);
         uint32_t newTriCount   = readCounter(4);
+        long long iterUs = iterTimer.getTime();
+        uint32_t trisRemoved = triCount - newTriCount;
+        double trisPerSec = (iterUs > 0) ? (double)trisRemoved / ((double)iterUs * 1e-6) : 0.0;
 
         std::cout << " collapsed=" << collapseCount
-                  << " tris=" << newTriCount << " (was " << triCount << ")" << std::endl;
+                  << " tris=" << newTriCount << " (was " << triCount << ")"
+                  << " " << iterUs / 1000 << "ms";
+        if (trisRemoved > 0) {
+            if (trisPerSec >= 1e6)
+                std::cout << " " << std::fixed << std::setprecision(1) << trisPerSec / 1e6 << "M tri/s";
+            else
+                std::cout << " " << std::fixed << std::setprecision(1) << trisPerSec / 1e3 << "K tri/s";
+        }
+        std::cout << std::defaultfloat << std::endl;
 
         if (collapseCount == 0) break;
         triCount = newTriCount;
         if (triCount <= static_cast<uint32_t>(originalTriCount * decimationTargetRatio)) {
             std::cout << "  target ratio reached\n";
             break;
+        }
+    }
+
+    // Print batch time breakdown
+    {
+        long long totalTime = batchATimeUs + batchBTimeUs;
+        if (totalTime > 0) {
+            std::cout << "Batch times: P3-P4 " << batchATimeUs / 1000 << "ms ("
+                      << std::fixed << std::setprecision(1)
+                      << 100.0 * batchATimeUs / totalTime << "%)  P5-P12 "
+                      << batchBTimeUs / 1000 << "ms ("
+                      << 100.0 * batchBTimeUs / totalTime << "%)"
+                      << std::defaultfloat << std::endl;
         }
     }
 

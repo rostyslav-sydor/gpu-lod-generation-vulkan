@@ -8,22 +8,39 @@
 // 1 thread per triangle.
 //
 // For each triangle, computes the plane equation and its fundamental quadric
-// matrix, then atomically accumulates it into the quadric of each vertex.
-// Uses fixed-point integer encoding for atomic addition.
+// matrix weighted by sqrt(area), then atomically accumulates it into each
+// vertex's quadric. Also detects boundary edges and flags vertices.
 //
 // Prerequisites:
 //   - quadricsData[] must be cleared to 0 before dispatch.
 //   - posIndices[] (PB) must be populated.
+//   - edgeHashMap[], edgeTriangles[] from Pass 4.
 //
 // Result:
 //   quadricsData[v*10..v*10+9] = sum of plane quadrics of all adjacent triangles
-//   (fixed-point encoded, read via loadQuadric())
+//   vertexFlags: FLAG_BOUNDARY set on vertices of boundary edges
 // ============================================================================
 
 #include "common.glsl"
 #include "bindings.glsl"
 
 layout(local_size_x = WORKGROUP_SIZE) in;
+
+bool isEdgeBoundary(uint v0, uint v1, uint hmMask) {
+    uint eMin = min(v0, v1);
+    uint eMax = max(v0, v1);
+    uint key = hash_edge(eMin, eMax) & hmMask;
+
+    for (uint probe = 0u; probe < MAX_PROBES; probe++) {
+        uint s = (key + probe) & hmMask;
+        if (edgeHashMap[s].x == eMin && edgeHashMap[s].y == eMax) {
+            uint edgeIdx = edgeHashMap[s].z;
+            return edgeTriangles[edgeIdx * 2u + 1u] == NONE;
+        }
+        if (edgeHashMap[s].x == HASHMAP_EMPTY) return false;
+    }
+    return false;
+}
 
 void main() {
     uint gid = gl_GlobalInvocationID.x;
@@ -39,32 +56,77 @@ void main() {
     vec3 p1 = loadVertex(i1).pos;
     vec3 p2 = loadVertex(i2).pos;
 
-    // Compute triangle normal (not normalized — area-weighted quadric)
     vec3 edge1 = p1 - p0;
     vec3 edge2 = p2 - p0;
     vec3 n = cross(edge1, edge2);
     float area2 = length(n);
 
-    // Skip degenerate triangles
     if (area2 < 1e-12) return;
 
-    n = n / area2;  // normalize
-
-    // Plane equation: n.x * x + n.y * y + n.z * z + d = 0
+    n /= area2;
     float d = -dot(n, p0);
     vec4 plane = vec4(n, d);
 
-    // Fundamental quadric from plane: K_p = p * p^T
-    Quadric qr = quadric_from_plane(plane);
+    if (costMode != COST_MODE_PAPER) {
+        Quadric qr = quadric_from_plane(plane);
 
-    // Weight by triangle area (half the cross product magnitude)
-    float weight = area2 * 0.5;
-    for (int i = 0; i < 10; i++) {
-        qr.q[i] *= weight;
+        float weight = sqrt(area2 * 0.5);
+        for (int i = 0; i < 10; i++) {
+            qr.q[i] *= weight;
+        }
+        qr.q[10] = weight;
+
+        atomicAddQuadric(i0, qr);
+        atomicAddQuadric(i1, qr);
+        atomicAddQuadric(i2, qr);
     }
 
-    // Atomically accumulate into each vertex's quadric
-    atomicAddQuadric(i0, qr);
-    atomicAddQuadric(i1, qr);
-    atomicAddQuadric(i2, qr);
+    // --- Detect boundary edges and flag vertices (every iteration) ---
+    // Border wall quadrics only on iteration 0 (persist via transfer like face quadrics)
+    uint mask = hashMapSize - 1u;
+    if (isEdgeBoundary(i0, i1, mask)) {
+        atomicOr(vertexFlags[i0], FLAG_BOUNDARY);
+        atomicOr(vertexFlags[i1], FLAG_BOUNDARY);
+        if (costMode == COST_MODE_MESHOPT) {
+            float ew = 10.0;
+            Quadric bq = quadric_from_triangle_edge(p0, p1, p2, ew);
+            Quadric fq = quadric_from_plane(plane);
+            float fw = sqrt(area2 * 0.5) * ew;
+            for (int i = 0; i < 10; i++) fq.q[i] *= fw;
+            fq.q[10] = 0.0;
+            bq = quadric_add(bq, fq);
+            atomicAddQuadric(i0, bq);
+            atomicAddQuadric(i1, bq);
+        }
+    }
+    if (isEdgeBoundary(i1, i2, mask)) {
+        atomicOr(vertexFlags[i1], FLAG_BOUNDARY);
+        atomicOr(vertexFlags[i2], FLAG_BOUNDARY);
+        if (costMode == COST_MODE_MESHOPT) {
+            float ew = 10.0;
+            Quadric bq = quadric_from_triangle_edge(p1, p2, p0, ew);
+            Quadric fq = quadric_from_plane(plane);
+            float fw = sqrt(area2 * 0.5) * ew;
+            for (int i = 0; i < 10; i++) fq.q[i] *= fw;
+            fq.q[10] = 0.0;
+            bq = quadric_add(bq, fq);
+            atomicAddQuadric(i1, bq);
+            atomicAddQuadric(i2, bq);
+        }
+    }
+    if (isEdgeBoundary(i2, i0, mask)) {
+        atomicOr(vertexFlags[i2], FLAG_BOUNDARY);
+        atomicOr(vertexFlags[i0], FLAG_BOUNDARY);
+        if (costMode == COST_MODE_MESHOPT) {
+            float ew = 10.0;
+            Quadric bq = quadric_from_triangle_edge(p2, p0, p1, ew);
+            Quadric fq = quadric_from_plane(plane);
+            float fw = sqrt(area2 * 0.5) * ew;
+            for (int i = 0; i < 10; i++) fq.q[i] *= fw;
+            fq.q[10] = 0.0;
+            bq = quadric_add(bq, fq);
+            atomicAddQuadric(i2, bq);
+            atomicAddQuadric(i0, bq);
+        }
+    }
 }

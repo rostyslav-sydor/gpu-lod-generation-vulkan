@@ -34,45 +34,34 @@
 
 layout(local_size_x = WORKGROUP_SIZE) in;
 
-// Check if this edge's descriptor matches all adjacent triangles of a vertex
 bool checkVertex(uint vertIdx, uint64_t descriptor) {
-    uint triIdx = adjHead[vertIdx];
+    uint packed = adjHead[vertIdx];
     uint safety = 0u;
 
-    while (triIdx != NONE && safety < 256u) {
+    while (packed != NONE && safety < 256u) {
+        uint triIdx = ADJ_TRI(packed);
         if (triDescriptor[triIdx] != descriptor) {
             return false;
         }
-
-        uint base = triIdx * 3u;
-        if (posIndices[base + 0u] == vertIdx)       triIdx = triAdjNext[base + 0u];
-        else if (posIndices[base + 1u] == vertIdx)   triIdx = triAdjNext[base + 1u];
-        else                                          triIdx = triAdjNext[base + 2u];
-
+        packed = triAdjNext[triIdx * 3u + ADJ_SLOT(packed)];
         safety++;
     }
     return true;
 }
 
-// Replace all occurrences of oldVert with newVert in triangles adjacent to oldVert
 void replaceInAdjacent(uint oldVert, uint newVert) {
-    uint triIdx = adjHead[oldVert];
+    uint packed = adjHead[oldVert];
     uint safety = 0u;
 
-    while (triIdx != NONE && safety < 256u) {
+    while (packed != NONE && safety < 256u) {
+        uint triIdx = ADJ_TRI(packed);
+        uint slot = ADJ_SLOT(packed);
         uint base = triIdx * 3u;
-        uint nextTri = NONE;
 
-        for (uint k = 0u; k < 3u; k++) {
-            if (posIndices[base + k] == oldVert) {
-                posIndices[base + k] = newVert;
-                // Also update the original index buffer
-                indices[base + k] = newVert;
-                nextTri = triAdjNext[base + k];
-            }
-        }
+        posIndices[base + slot] = newVert;
+        indices[base + slot] = newVert;
 
-        triIdx = nextTri;
+        packed = triAdjNext[base + slot];
         safety++;
     }
 }

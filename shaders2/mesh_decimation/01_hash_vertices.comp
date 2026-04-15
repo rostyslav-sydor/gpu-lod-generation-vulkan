@@ -9,7 +9,6 @@
 //
 // Inserts each vertex into a hash map keyed by all attributes (pos + normal).
 // Produces vertexMap[i] = canonical index for vertex i.
-// Also builds position-only hash for generating PB and flagging discontinuities.
 // ============================================================================
 
 #include "common.glsl"
@@ -23,44 +22,40 @@ void main() {
 
     Vertex v = loadVertex(gid);
 
-    // --- Full attribute dedup ---
-    uint fullHash = hash_vertex(v);
-    uint key_high = fullHash;
-    uint key_low  = hash_combine(hash_float(v.pos.x), hash_float(v.normal.z));
-
+    uint key = hash_vertex(v);
     uint mask = hashMapSize - 1u;
-    uint slot = murmur_mix(key_high ^ key_low) & mask;
+    uint slot = key & mask;
 
-    // Open-addressing insert with linear probing
     for (uint probe = 0u; probe < MAX_PROBES; probe++) {
         uint s = (slot + probe) & mask;
 
-        uint prev = atomicCompSwap(hashMapData[s].z, HASHMAP_EMPTY, gid);
+        // Try to claim this slot: write key to .x atomically
+        uint prev = atomicCompSwap(vertexHashMap[s].x, HASHMAP_EMPTY, key);
 
         if (prev == HASHMAP_EMPTY) {
-            // We claimed this slot — write our key
-            hashMapData[s].x = key_high;
-            hashMapData[s].y = key_low;
-            // This vertex is its own canonical representative
+            vertexHashMap[s].y = gid;
             vertexMap[gid] = gid;
             return;
         }
 
-        // Slot occupied — wait for key to be written, then compare
-        memoryBarrierBuffer();
+        // Slot occupied — check if key matches
+        if (prev == key) {
+            // Potential match — wait for value to be written, then verify
+            uint canonical = vertexHashMap[s].y;
+            while (canonical == HASHMAP_EMPTY) {
+                memoryBarrierBuffer();
+                canonical = vertexHashMap[s].y;
+            }
 
-        if (hashMapData[s].x == key_high && hashMapData[s].y == key_low) {
-            // Potential match — verify actual attributes to handle hash collisions
-            uint canonical = hashMapData[s].z;
             Vertex existing = loadVertex(canonical);
             if (vertices_equal(v, existing)) {
                 vertexMap[gid] = canonical;
                 return;
             }
-            // Hash collision with different attributes — continue probing
+            // Hash collision — different data, same key — continue probing
         }
     }
 
-    // Fallback: couldn't find slot (table too full), map to self
+    // Fallback: table too full, map to self
     vertexMap[gid] = gid;
 }

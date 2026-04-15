@@ -32,8 +32,9 @@ layout(set = 0, binding = 4) buffer AdjHeadBuffer {
 };
 
 // B5: Per-triangle adjacency next pointers (packed as 3 uints per triangle)
+// Each entry is packed: (triIdx << 2 | slot), where slot is 0/1/2
 layout(set = 0, binding = 5) buffer TriAdjNextBuffer {
-    uint triAdjNext[];   // [triIdx*3 + 0/1/2] = next triangle for vertex 0/1/2
+    uint triAdjNext[];   // [triIdx*3 + k] = packed(nextTri, nextSlot)
 };
 
 // B6: Unique edge list — uvec2(v0, v1) per edge, using position indices
@@ -46,16 +47,17 @@ layout(set = 0, binding = 7) buffer EdgeTriBuffer {
     uint edgeTriangles[];  // [edgeIdx*2+0] = tri0, [edgeIdx*2+1] = tri1
 };
 
-// B8: Per-triangle edge indices — 3 uints per triangle
+// B8: Unused
 layout(set = 0, binding = 8) buffer TriEdgeBuffer {
-    uint triEdges[];     // [triIdx*3 + 0/1/2] = edge index for edge 0/1/2
+    uint triEdges[];
 };
 
-// B9: Per-vertex quadric — 10 ints per vertex (fixed-point for atomic accumulation)
-// Fixed-point scale factor: 2^20 = 1048576 for good precision
+// B9: Per-vertex quadric — 11 ints per vertex (fixed-point for atomic accumulation)
+// Fields 0-9: symmetric 4x4 quadric, field 10: accumulated weight (for normalization)
 #define QUADRIC_SCALE 1048576.0
+#define QUADRIC_FIELDS 11
 layout(set = 0, binding = 9) buffer QuadricBuffer {
-    int quadricsData[];  // [vertIdx*10 + 0..9], fixed-point encoded
+    int quadricsData[];  // [vertIdx*QUADRIC_FIELDS + 0..10], fixed-point encoded
 };
 
 // B10: Per-edge QEM cost
@@ -78,9 +80,9 @@ layout(set = 0, binding = 13) buffer TriDescriptorBuffer {
     uint64_t triDescriptor[];
 };
 
-// B14: Hash map — open addressing table
-layout(set = 0, binding = 14) buffer HashMapBuffer {
-    uvec4 hashMapData[];
+// B14: Edge hash map — open addressing table (used by Pass 4)
+layout(set = 0, binding = 14) buffer EdgeHashMapBuffer {
+    uvec4 edgeHashMap[];
 };
 
 // B15: Atomic counters
@@ -108,6 +110,16 @@ layout(set = 1, binding = 3) buffer AliveBuffer {
     uint aliveFlags[];
 };
 
+// B20: Vertex hash map — open addressing table (used by Pass 1)
+layout(set = 1, binding = 4) buffer VertexHashMapBuffer {
+    uvec4 vertexHashMap[];
+};
+
+// B21: Position hash map — open addressing table (used by Pass 2)
+layout(set = 1, binding = 5) buffer PositionHashMapBuffer {
+    uvec4 positionHashMap[];
+};
+
 // ============================================================================
 // Push constants for per-dispatch parameters
 // ============================================================================
@@ -119,6 +131,7 @@ layout(push_constant) uniform PushConstants {
     uint hashMapSize;
     float costThreshold;
     uint iteration;
+    uint costMode;
 };
 
 // ============================================================================
@@ -145,23 +158,23 @@ void storeVertex(uint idx, Vertex v) {
 
 Quadric loadQuadric(uint idx) {
     Quadric qr;
-    uint base = idx * 10u;
-    for (int i = 0; i < 10; i++) {
+    uint base = idx * QUADRIC_FIELDS;
+    for (int i = 0; i < QUADRIC_FIELDS; i++) {
         qr.q[i] = float(quadricsData[base + uint(i)]) / QUADRIC_SCALE;
     }
     return qr;
 }
 
 void clearQuadric(uint idx) {
-    uint base = idx * 10u;
-    for (int i = 0; i < 10; i++) {
+    uint base = idx * QUADRIC_FIELDS;
+    for (int i = 0; i < QUADRIC_FIELDS; i++) {
         quadricsData[base + uint(i)] = 0;
     }
 }
 
 void atomicAddQuadric(uint idx, Quadric qr) {
-    uint base = idx * 10u;
-    for (int i = 0; i < 10; i++) {
+    uint base = idx * QUADRIC_FIELDS;
+    for (int i = 0; i < QUADRIC_FIELDS; i++) {
         int ival = int(round(qr.q[i] * QUADRIC_SCALE));
         atomicAdd(quadricsData[base + uint(i)], ival);
     }

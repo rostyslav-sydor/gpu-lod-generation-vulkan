@@ -13,6 +13,10 @@ void App::initWindow() {
     window = glfwCreateWindow(WIDTH, HEIGHT, "Vulkan", nullptr, nullptr);
     glfwSetWindowUserPointer(window, this);
     glfwSetFramebufferSizeCallback(window, framebufferResizeCallback);
+    glfwSetKeyCallback(window, keyCallback);
+    glfwSetCursorPosCallback(window, mouseCallback);
+    glfwSetMouseButtonCallback(window, mouseButtonCallback);
+    glfwSetScrollCallback(window, scrollCallback);
 }
 
 
@@ -43,8 +47,7 @@ void App::initVulkan() {
     createTextureSampler();
     loadModel();
     printTimes();
-    createVertexBuffer();
-    createIndexBuffer();
+    createMeshBuffers();
     createUniformBuffers();
     createDescriptorSets();
     createCommandBuffers();
@@ -53,7 +56,7 @@ void App::initVulkan() {
 
 void App::createTextureImage() {
     int texWidth, texHeight, texChannels;
-    stbi_uc* pixels = stbi_load(TEXTURE_PATH.c_str(), &texWidth, &texHeight, &texChannels, STBI_rgb_alpha);
+    stbi_uc* pixels = stbi_load(texturePath.c_str(), &texWidth, &texHeight, &texChannels, STBI_rgb_alpha);
     VkDeviceSize imageSize = texWidth * texHeight * 4;
 
     if (!pixels) {
@@ -124,11 +127,7 @@ void App::cleanup() {
     vkDestroyDescriptorSetLayout(device, computeDescriptorSetLayout, nullptr);
     vkDestroyDescriptorSetLayout(device, descriptorSetLayout, nullptr);
 
-    vkDestroyBuffer(device, indexBuffer, nullptr);
-    vkFreeMemory(device, indexBufferMemory, nullptr);
-
-    vkDestroyBuffer(device, vertexBuffer, nullptr);
-    vkFreeMemory(device, vertexBufferMemory, nullptr);
+    cleanupMeshBuffers();
 
     vkDestroyBuffer(device, compVertexBuffer, nullptr);
     vkDestroyBuffer(device, compMeshletsBuffer, nullptr);
@@ -834,6 +833,135 @@ void App::createIndexBuffer() {
     vkFreeMemory(device, stagingBufferMemory, nullptr);
 }
 
+void App::createMeshBuffers() {
+    const size_t MAX_RENDER_TRIS = 500000;
+    for (int i = 0; i < RENDER_MODE_COUNT; i++) {
+        auto& snap = meshSnapshots[i];
+        if (!snap.valid || snap.verts.empty() || snap.inds.empty()) continue;
+
+        if (snap.inds.size() / 3 > MAX_RENDER_TRIS) {
+            std::cout << "Skipping render buffer for mode " << i
+                      << " (" << snap.inds.size()/3 << " tris, too large)" << std::endl;
+            snap.vertBuf = VK_NULL_HANDLE;
+            snap.idxBuf  = VK_NULL_HANDLE;
+            snap.valid = false;
+            continue;
+        }
+
+        VkDeviceSize vertSize = snap.verts.size() * sizeof(Vertex);
+        createAndCopyBufferLocal(vertSize, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+            snap.verts.data(), snap.vertBuf, snap.vertMem);
+
+        VkDeviceSize idxSize = snap.inds.size() * sizeof(uint32_t);
+        createAndCopyBufferLocal(idxSize, VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
+            snap.inds.data(), snap.idxBuf, snap.idxMem);
+    }
+}
+
+void App::cleanupMeshBuffers() {
+    for (int i = 0; i < RENDER_MODE_COUNT; i++) {
+        auto& snap = meshSnapshots[i];
+        if (snap.vertBuf != VK_NULL_HANDLE) {
+            vkDestroyBuffer(device, snap.vertBuf, nullptr);
+            vkFreeMemory(device, snap.vertMem, nullptr);
+            snap.vertBuf = VK_NULL_HANDLE;
+        }
+        if (snap.idxBuf != VK_NULL_HANDLE) {
+            vkDestroyBuffer(device, snap.idxBuf, nullptr);
+            vkFreeMemory(device, snap.idxMem, nullptr);
+            snap.idxBuf = VK_NULL_HANDLE;
+        }
+    }
+}
+
+void App::keyCallback(GLFWwindow* window, int key, int scancode, int action, int mods) {
+    if (action != GLFW_PRESS) return;
+    auto app = reinterpret_cast<App*>(glfwGetWindowUserPointer(window));
+
+    if (key == GLFW_KEY_ESCAPE) {
+        if (app->mouseCapture) {
+            app->mouseCapture = false;
+            app->firstMouse = true;
+            glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
+        }
+        return;
+    }
+
+    RenderMode newMode = app->activeRenderMode;
+    if (key == GLFW_KEY_G && app->meshSnapshots[RENDER_GPU].valid)
+        newMode = RENDER_GPU;
+    else if (key == GLFW_KEY_C && app->meshSnapshots[RENDER_CPU].valid)
+        newMode = RENDER_CPU;
+    else if (key == GLFW_KEY_O && app->meshSnapshots[RENDER_ORIGINAL].valid)
+        newMode = RENDER_ORIGINAL;
+
+    if (newMode != app->activeRenderMode) {
+        app->activeRenderMode = newMode;
+        const char* names[] = {"GPU", "CPU (meshopt)", "Original"};
+        std::cout << "Render mode: " << names[newMode] << std::endl;
+    }
+}
+
+void App::mouseCallback(GLFWwindow* window, double xpos, double ypos) {
+    auto app = reinterpret_cast<App*>(glfwGetWindowUserPointer(window));
+    if (!app->mouseCapture) return;
+
+    if (app->firstMouse) {
+        app->lastMouseX = xpos;
+        app->lastMouseY = ypos;
+        app->firstMouse = false;
+        return;
+    }
+
+    float xoffset = (float)(xpos - app->lastMouseX) * app->mouseSensitivity;
+    float yoffset = (float)(app->lastMouseY - ypos) * app->mouseSensitivity;
+    app->lastMouseX = xpos;
+    app->lastMouseY = ypos;
+
+    app->cameraYaw   += xoffset;
+    app->cameraPitch += yoffset;
+    app->cameraPitch = glm::clamp(app->cameraPitch, -89.0f, 89.0f);
+
+    glm::vec3 front;
+    front.x = cos(glm::radians(app->cameraYaw)) * cos(glm::radians(app->cameraPitch));
+    front.y = sin(glm::radians(app->cameraYaw)) * cos(glm::radians(app->cameraPitch));
+    front.z = sin(glm::radians(app->cameraPitch));
+    app->cameraFront = glm::normalize(front);
+}
+
+void App::mouseButtonCallback(GLFWwindow* window, int button, int action, int mods) {
+    if (button == GLFW_MOUSE_BUTTON_RIGHT && action == GLFW_PRESS) {
+        auto app = reinterpret_cast<App*>(glfwGetWindowUserPointer(window));
+        app->mouseCapture = !app->mouseCapture;
+        app->firstMouse = true;
+        glfwSetInputMode(window, GLFW_CURSOR,
+            app->mouseCapture ? GLFW_CURSOR_DISABLED : GLFW_CURSOR_NORMAL);
+    }
+}
+
+void App::scrollCallback(GLFWwindow* window, double /*xoffset*/, double yoffset) {
+    auto app = reinterpret_cast<App*>(glfwGetWindowUserPointer(window));
+    app->cameraSpeed = glm::clamp(app->cameraSpeed + (float)yoffset * 0.5f, 0.1f, 50.0f);
+}
+
+void App::processInput(float deltaTime) {
+    float velocity = cameraSpeed * deltaTime;
+    glm::vec3 right = glm::normalize(glm::cross(cameraFront, cameraUp));
+
+    if (glfwGetKey(window, GLFW_KEY_W) == GLFW_PRESS)
+        cameraPos += cameraFront * velocity;
+    if (glfwGetKey(window, GLFW_KEY_S) == GLFW_PRESS)
+        cameraPos -= cameraFront * velocity;
+    if (glfwGetKey(window, GLFW_KEY_A) == GLFW_PRESS)
+        cameraPos -= right * velocity;
+    if (glfwGetKey(window, GLFW_KEY_D) == GLFW_PRESS)
+        cameraPos += right * velocity;
+    if (glfwGetKey(window, GLFW_KEY_SPACE) == GLFW_PRESS)
+        cameraPos += cameraUp * velocity;
+    if (glfwGetKey(window, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS)
+        cameraPos -= cameraUp * velocity;
+}
+
 void App::createUniformBuffers() {
     VkDeviceSize bufferSize = sizeof(UniformBufferObject);
 
@@ -1058,15 +1186,16 @@ void App::recordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t imageIndex
     scissor.extent = swapChainExtent;
     vkCmdSetScissor(commandBuffer, 0, 1, &scissor);
 
-    VkBuffer vertexBuffers[] = { vertexBuffer };
+    auto& snap = meshSnapshots[activeRenderMode];
+    VkBuffer vertexBuffers[] = { snap.vertBuf };
     VkDeviceSize offsets[] = { 0 };
     vkCmdBindVertexBuffers(commandBuffer, 0, 1, vertexBuffers, offsets);
 
-    vkCmdBindIndexBuffer(commandBuffer, indexBuffer, 0, VK_INDEX_TYPE_UINT32);
+    vkCmdBindIndexBuffer(commandBuffer, snap.idxBuf, 0, VK_INDEX_TYPE_UINT32);
 
     vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout, 0, 1, &descriptorSets[currentFrame], 0, nullptr);
 
-    vkCmdDrawIndexed(commandBuffer, static_cast<uint32_t>(indices.size()), 1, 0, 0, 0);
+    vkCmdDrawIndexed(commandBuffer, static_cast<uint32_t>(snap.inds.size()), 1, 0, 0, 0);
 
     vkCmdEndRenderPass(commandBuffer);
 
@@ -1102,17 +1231,11 @@ void App::createSyncObjects() {
 }
 
 void App::updateUniformBuffer(uint32_t currentImage) {
-    static auto startTime = std::chrono::high_resolution_clock::now();
-
-    auto currentTime = std::chrono::high_resolution_clock::now();
-    float time = std::chrono::duration<float, std::chrono::seconds::period>(currentTime - startTime).count();
-
     UniformBufferObject ubo{};
-    ubo.model = glm::scale(glm::mat4(1.0f), glm::vec3(0.01f)) * 
-    glm::rotate(glm::mat4(1.0f), 0.1f * time * glm::radians(90.0f), glm::vec3(1.5f, 0.0f, 1.5f)) *
-    glm::translate(glm::mat4(1.0f), glm::vec3(-5.f, 0.f, 0.f));
+    ubo.model = glm::scale(glm::mat4(1.0f), glm::vec3(0.01f)) *
+        glm::translate(glm::mat4(1.0f), glm::vec3(-5.f, 0.f, 0.f));
 
-    ubo.view = glm::lookAt(glm::vec3(2.0f, 2.0f, 2.0f), glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0.0f, 0.0f, 1.0f));
+    ubo.view = glm::lookAt(cameraPos, cameraPos + cameraFront, cameraUp);
     ubo.proj = glm::perspective(glm::radians(45.0f), swapChainExtent.width / (float)swapChainExtent.height, 0.1f, 500.0f);
     ubo.proj[1][1] *= -1;
 

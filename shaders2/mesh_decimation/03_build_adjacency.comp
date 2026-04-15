@@ -10,13 +10,17 @@
 // For each triangle in PB, atomically prepend it to the linked list of each
 // of its 3 vertices. Uses atomicExchange to build lock-free linked lists.
 //
+// Each entry is packed as (triIdx << 2 | slot), where slot is 0/1/2
+// indicating which vertex of the triangle this list entry refers to.
+// This allows traversal without looking up posIndices.
+//
 // Prerequisites:
 //   - adjHead[] must be cleared to NONE (0xFFFFFFFF) before dispatch.
 //   - posIndices[] (PB) must be populated from Pass 2.
 //
 // Result:
-//   adjHead[v] = index of first triangle adjacent to vertex v
-//   triAdjNext[tri*3 + k] = next triangle in list for vertex k of triangle tri
+//   adjHead[v] = packed(firstTri, slot) for vertex v
+//   triAdjNext[tri*3 + k] = packed(nextTri, nextSlot) in list for vertex k
 // ============================================================================
 
 #include "common.glsl"
@@ -30,13 +34,11 @@ void main() {
 
     uint baseIdx = gid * 3u;
 
-    // For each of the 3 vertices of this triangle
     for (uint k = 0u; k < 3u; k++) {
         uint vertIdx = posIndices[baseIdx + k];
 
-        // Atomically prepend this triangle to the vertex's adjacency list
-        // old = adjHead[vertIdx]; adjHead[vertIdx] = gid; triAdjNext[...] = old;
-        uint oldHead = atomicExchange(adjHead[vertIdx], gid);
+        uint packed = ADJ_PACK(gid, k);
+        uint oldHead = atomicExchange(adjHead[vertIdx], packed);
         triAdjNext[gid * 3u + k] = oldHead;
     }
 }

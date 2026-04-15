@@ -29,6 +29,7 @@
 #include "timer.hpp"
 
 #include <iostream>
+#include <iomanip>
 #include <fstream>
 #include <stdexcept>
 #include <algorithm>
@@ -40,6 +41,7 @@
 #include <cstring>
 #include <cstdlib>
 #include <cstdint>
+#include <cmath>
 #include <limits>
 #include <array>
 #include <optional>
@@ -49,14 +51,17 @@
 const uint32_t WIDTH = 800;
 const uint32_t HEIGHT = 600;
 
-const std::string MODEL_PATH = "scene.gltf";
-const std::string TEXTURE_PATH = "bunny.png";
+inline std::string modelPath = std::getenv("MODEL_PATH") ? std::getenv("MODEL_PATH") : "scene.gltf";
+inline std::string texturePath = std::getenv("TEXTURE_PATH") ? std::getenv("TEXTURE_PATH") : "bunny.png";
 
 const bool simplify = false;
 inline bool useGPUDecimation = true;
 inline float decimationCostThreshold = std::getenv("DECIM_COST") ? std::stof(std::getenv("DECIM_COST")) : 0.01f;
 inline float decimationTargetRatio = std::getenv("DECIM_RATIO") ? std::stof(std::getenv("DECIM_RATIO")) : 0.1f;
 inline uint32_t maxDecimationIterations = std::getenv("DECIM_NUM") ? std::stoi(std::getenv("DECIM_NUM")) : 100;
+inline float decimationGrowthRate = std::getenv("DECIM_GROW") ? std::stof(std::getenv("DECIM_GROW")) : 1.0f;
+inline bool useCPUDecimation = (std::getenv("CPU_DECIM") ? std::string(std::getenv("CPU_DECIM")) != "0" : false);
+inline uint32_t decimationCostMode = std::getenv("DECIM_MODE") ? std::stoi(std::getenv("DECIM_MODE")) : 0;
 
 const bool deviceLocalBuffer = false;
 const bool singleBuffer = false;
@@ -71,6 +76,7 @@ struct DecimationPushConstants {
     uint32_t hashMapSize;
     float costThreshold;
     uint32_t iteration;
+    uint32_t costMode;
 };
 
 enum DecimationBuffer {
@@ -88,13 +94,27 @@ enum DecimationBuffer {
     DB_EDGE_FLAG,
     DB_EDGE_TARGET,
     DB_TRI_DESCRIPTOR,
-    DB_HASHMAP,
+    DB_HASHMAP_EDGE,
     DB_COUNTER,
     DB_VERTEX_MAP,
     DB_POS_MAP,
     DB_SCAN,
     DB_ALIVE,
+    DB_HASHMAP_VERTEX,
+    DB_HASHMAP_POSITION,
     DB_COUNT
+};
+
+enum RenderMode { RENDER_GPU = 0, RENDER_CPU, RENDER_ORIGINAL, RENDER_MODE_COUNT };
+
+struct MeshSnapshot {
+    std::vector<Vertex> verts;
+    std::vector<uint32_t> inds;
+    VkBuffer vertBuf = VK_NULL_HANDLE;
+    VkDeviceMemory vertMem = VK_NULL_HANDLE;
+    VkBuffer idxBuf = VK_NULL_HANDLE;
+    VkDeviceMemory idxMem = VK_NULL_HANDLE;
+    bool valid = false;
 };
 
 const int MAX_FRAMES_IN_FLIGHT = 2;
@@ -249,6 +269,22 @@ private:
 
     bool framebufferResized = false;
 
+    MeshSnapshot meshSnapshots[RENDER_MODE_COUNT];
+    RenderMode activeRenderMode = RENDER_GPU;
+
+    // Free camera state
+    glm::vec3 cameraPos   = glm::vec3(2.0f, 2.0f, 2.0f);
+    glm::vec3 cameraFront = glm::normalize(glm::vec3(-1.0f, -1.0f, -1.0f));
+    glm::vec3 cameraUp    = glm::vec3(0.0f, 0.0f, 1.0f);
+    float cameraYaw   = -135.0f;
+    float cameraPitch = -35.26f;
+    float cameraSpeed = 2.0f;
+    float mouseSensitivity = 0.1f;
+    bool mouseCapture = false;
+    double lastMouseX = 0.0, lastMouseY = 0.0;
+    bool firstMouse = true;
+    float lastFrameTime = 0.0f;
+
     struct alignas(16) Triangle {
         glm::uvec3 v;
         Triangle(uint8_t v1, uint8_t v2, uint8_t v3) {v[0] = v1; v[1]=v2; v[2]=v3;}
@@ -263,8 +299,14 @@ private:
     void initWindow();
     void initVulkan();
     void mainLoop() {
+        lastFrameTime = (float)glfwGetTime();
         while (!glfwWindowShouldClose(window)) {
+            float currentTime = (float)glfwGetTime();
+            float deltaTime = currentTime - lastFrameTime;
+            lastFrameTime = currentTime;
+
             glfwPollEvents();
+            processInput(deltaTime);
             drawFrame();
         }
 
@@ -373,6 +415,10 @@ private:
     void allocateDecimationBuffers(uint32_t vertexCount, uint32_t triangleCount);
     void writeDecimationDescriptorSets();
     void runDecimation();
+    void runCPUDecimation();
+    void createMeshBuffers();
+    void cleanupMeshBuffers();
+    void printDecimationMetrics();
     void cleanupDecimation();
 
     void splitMesh(std::vector<meshopt_Meshlet>& meshlets,
@@ -441,6 +487,12 @@ private:
 
     bool checkValidationLayerSupport();
 
+    void processInput(float deltaTime);
+
     static std::vector<char> readFile(const std::string& filename);
     static void framebufferResizeCallback(GLFWwindow* window, int width, int height);
+    static void keyCallback(GLFWwindow* window, int key, int scancode, int action, int mods);
+    static void mouseCallback(GLFWwindow* window, double xpos, double ypos);
+    static void mouseButtonCallback(GLFWwindow* window, int button, int action, int mods);
+    static void scrollCallback(GLFWwindow* window, double xoffset, double yoffset);
 };

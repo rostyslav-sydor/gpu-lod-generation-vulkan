@@ -303,9 +303,9 @@ void App::createDecimationDescriptorSetLayouts() {
         throw std::runtime_error("failed to create decimation descriptor set layout 0!");
     }
 
-    // Set 1: 4 storage buffer bindings (bindings 0-3)
-    std::array<VkDescriptorSetLayoutBinding, 4> set1Bindings{};
-    for (uint32_t i = 0; i < 4; i++) {
+    // Set 1: 6 storage buffer bindings (bindings 0-5)
+    std::array<VkDescriptorSetLayoutBinding, 6> set1Bindings{};
+    for (uint32_t i = 0; i < 6; i++) {
         set1Bindings[i].binding = i;
         set1Bindings[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
         set1Bindings[i].descriptorCount = 1;
@@ -347,7 +347,7 @@ void App::createDecimationPipelines() {
     const std::string shaderNames[DECIMATION_PASS_COUNT] = {
         "01_hash_vertices", "02_dedup_indices", "03_build_adjacency",
         "04_build_edges", "05_compute_quadrics", "06_compute_edge_cost",
-        "07_init_descriptors", "08_scatter_descriptors", "09_collapse_edges",
+        "07_init_descriptors", "08_select_candidates", "09_collapse_edges",
         "10_mark_degenerate", "11_compact", "12_copy_back"
     };
 
@@ -394,12 +394,14 @@ void App::allocateDecimationBuffers(uint32_t vertCount, uint32_t triCount) {
     decimationBufSizes[DB_EDGE]           = (VkDeviceSize)maxEdges * 2 * sizeof(uint32_t);
     decimationBufSizes[DB_EDGE_TRI]       = (VkDeviceSize)maxEdges * 2 * sizeof(uint32_t);
     decimationBufSizes[DB_TRI_EDGE]       = (VkDeviceSize)triCount * 3 * sizeof(uint32_t);
-    decimationBufSizes[DB_QUADRIC]        = (VkDeviceSize)vertCount * 10 * sizeof(int32_t);
+    decimationBufSizes[DB_QUADRIC]        = (VkDeviceSize)vertCount * 11 * sizeof(int32_t);
     decimationBufSizes[DB_EDGE_COST]      = (VkDeviceSize)maxEdges * sizeof(float);
     decimationBufSizes[DB_EDGE_FLAG]      = (VkDeviceSize)maxEdges * sizeof(uint32_t);
     decimationBufSizes[DB_EDGE_TARGET]    = (VkDeviceSize)maxEdges * 3 * sizeof(float) * 4;
     decimationBufSizes[DB_TRI_DESCRIPTOR] = (VkDeviceSize)triCount * sizeof(uint64_t);
-    decimationBufSizes[DB_HASHMAP]        = (VkDeviceSize)hashMapSize * 3 * 4 * sizeof(uint32_t);
+    decimationBufSizes[DB_HASHMAP_EDGE]   = (VkDeviceSize)hashMapSize * 4 * sizeof(uint32_t);
+    decimationBufSizes[DB_HASHMAP_VERTEX] = (VkDeviceSize)hashMapSize * 4 * sizeof(uint32_t);
+    decimationBufSizes[DB_HASHMAP_POSITION] = (VkDeviceSize)hashMapSize * 4 * sizeof(uint32_t);
     decimationBufSizes[DB_COUNTER]        = 256;
     decimationBufSizes[DB_VERTEX_MAP]     = (VkDeviceSize)vertCount * sizeof(uint32_t);
     decimationBufSizes[DB_POS_MAP]        = (VkDeviceSize)vertCount * sizeof(uint32_t);
@@ -432,8 +434,9 @@ void App::writeDecimationDescriptorSets() {
     decimationDescSet1 = sets[1];
 
     // Set 0: bindings 0-15 map to DB_VERTEX..DB_COUNTER
-    std::array<VkWriteDescriptorSet, 20> writes{};
-    std::array<VkDescriptorBufferInfo, 20> bufInfos{};
+    // (binding 14 = DB_HASHMAP_EDGE, which replaced the old combined DB_HASHMAP)
+    std::array<VkWriteDescriptorSet, 22> writes{};
+    std::array<VkDescriptorBufferInfo, 22> bufInfos{};
 
     for (int i = 0; i < 16; i++) {
         bufInfos[i] = { decimationBufs[i], 0, VK_WHOLE_SIZE };
@@ -447,6 +450,7 @@ void App::writeDecimationDescriptorSets() {
     }
 
     // Set 1: bindings 0-3 map to DB_VERTEX_MAP..DB_ALIVE
+    //         bindings 4-5 map to DB_HASHMAP_VERTEX, DB_HASHMAP_POSITION
     for (int i = 0; i < 4; i++) {
         int dbIdx = DB_VERTEX_MAP + i;
         bufInfos[16 + i] = { decimationBufs[dbIdx], 0, VK_WHOLE_SIZE };
@@ -459,7 +463,25 @@ void App::writeDecimationDescriptorSets() {
         writes[16 + i].pBufferInfo = &bufInfos[16 + i];
     }
 
-    vkUpdateDescriptorSets(device, 20, writes.data(), 0, nullptr);
+    bufInfos[20] = { decimationBufs[DB_HASHMAP_VERTEX], 0, VK_WHOLE_SIZE };
+    writes[20].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writes[20].dstSet = decimationDescSet1;
+    writes[20].dstBinding = 4;
+    writes[20].dstArrayElement = 0;
+    writes[20].descriptorCount = 1;
+    writes[20].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    writes[20].pBufferInfo = &bufInfos[20];
+
+    bufInfos[21] = { decimationBufs[DB_HASHMAP_POSITION], 0, VK_WHOLE_SIZE };
+    writes[21].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writes[21].dstSet = decimationDescSet1;
+    writes[21].dstBinding = 5;
+    writes[21].dstArrayElement = 0;
+    writes[21].descriptorCount = 1;
+    writes[21].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    writes[21].pBufferInfo = &bufInfos[21];
+
+    vkUpdateDescriptorSets(device, 22, writes.data(), 0, nullptr);
 }
 
 void App::cleanupDecimation() {

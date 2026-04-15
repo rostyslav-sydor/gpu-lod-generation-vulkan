@@ -24,6 +24,11 @@
 #define FLAG_BOUNDARY       (1u << 1)
 #define FLAG_COLLAPSED      (1u << 2)
 
+// Cost function modes (matches DecimationPushConstants.costMode)
+#define COST_MODE_QEM       0u
+#define COST_MODE_PAPER     1u
+#define COST_MODE_MESHOPT   2u
+
 // Edge flags
 #define EDGE_ELIGIBLE       (1u << 0)
 #define EDGE_BOUNDARY       (1u << 1)
@@ -38,13 +43,14 @@ struct Vertex {
     vec2 texCoord;
 };
 
-// Symmetric 4x4 quadric stored as 10 floats:
+// Symmetric 4x4 quadric stored as 10 floats + 1 weight:
 //   | q0  q1  q2  q3 |
 //   | q1  q4  q5  q6 |
 //   | q2  q5  q7  q8 |
 //   | q3  q6  q8  q9 |
+// q[10] = w (accumulated weight, used by COST_MODE_MESHOPT for normalization)
 struct Quadric {
-    float q[10];
+    float q[11];
 };
 
 // ============================================================================
@@ -102,7 +108,7 @@ uint hash_edge(uint v0, uint v1) {
 
 Quadric quadric_zero() {
     Quadric qr;
-    for (int i = 0; i < 10; i++) qr.q[i] = 0.0;
+    for (int i = 0; i < 11; i++) qr.q[i] = 0.0;
     return qr;
 }
 
@@ -115,12 +121,13 @@ Quadric quadric_from_plane(vec4 plane) {
     qr.q[4] = b * b;  qr.q[5] = b * c;  qr.q[6] = b * d;
     qr.q[7] = c * c;  qr.q[8] = c * d;
     qr.q[9] = d * d;
+    qr.q[10] = 0.0;
     return qr;
 }
 
 Quadric quadric_add(Quadric a, Quadric b) {
     Quadric qr;
-    for (int i = 0; i < 10; i++) qr.q[i] = a.q[i] + b.q[i];
+    for (int i = 0; i < 11; i++) qr.q[i] = a.q[i] + b.q[i];
     return qr;
 }
 
@@ -175,23 +182,71 @@ bool quadric_optimal(Quadric qr, out vec3 result) {
     return true;
 }
 
+// Build a quadric that penalizes deviation from a point (vertex regularization).
+// The quadric evaluates to |v - p|^2 when scaled by weight.
+Quadric quadric_from_point(vec3 p, float weight) {
+    Quadric qr;
+    qr.q[0] = weight;       qr.q[1] = 0.0;         qr.q[2] = 0.0;         qr.q[3] = -weight * p.x;
+    qr.q[4] = weight;       qr.q[5] = 0.0;         qr.q[6] = -weight * p.y;
+    qr.q[7] = weight;       qr.q[8] = -weight * p.z;
+    qr.q[9] = weight * dot(p, p);
+    qr.q[10] = weight;
+    return qr;
+}
+
+// Build a border-edge quadric matching meshoptimizer's quadricFromTriangleEdge.
+// Creates a wall plane perpendicular to edge p0->p1, pointing toward p2.
+// Weight is scaled by edge length (matching meshopt's linear edge scaling).
+Quadric quadric_from_triangle_edge(vec3 p0, vec3 p1, vec3 p2, float weight) {
+    vec3 p10 = p1 - p0;
+    float lengthsq = dot(p10, p10);
+    float edgeLen = sqrt(lengthsq);
+
+    vec3 p20 = p2 - p0;
+    float p20p = dot(p20, p10);
+
+    // Perpendicular from p2 to line p0-p1 (in the triangle plane)
+    vec3 perp = p20 * lengthsq - p10 * p20p;
+    float perpLen = length(perp);
+    if (perpLen < 1e-12) return quadric_zero();
+    perp /= perpLen;
+
+    float d = -dot(perp, p0);
+    float w = edgeLen * weight;
+
+    Quadric qr = quadric_from_plane(vec4(perp, d));
+    for (int i = 0; i < 10; i++) qr.q[i] *= w;
+    qr.q[10] = w;
+    return qr;
+}
+
 // ============================================================================
 // GPU Hash Map Protocol (open-addressing, linear probing)
 //
-// Each shader implements hash map operations inline on the hashMapData[] SSBO.
-// Layout per slot: uvec4(key_high, key_low, value, reserved)
+// Three separate SSBOs, one per use case:
+//   vertexHashMap[]   — Pass 1: vertex dedup.    Slot: (key, vertexIdx, -, -)
+//   positionHashMap[] — Pass 2: position dedup.  Slot: (key, vertexIdx, -, -)
+//   edgeHashMap[]     — Pass 4: edge dedup.      Slot: (vMin, vMax, edgeIdx, -)
 //
-// Insert pattern:
-//   1. Compute slot = murmur_mix(key_high ^ key_low) & (mapSize - 1)
-//   2. atomicCompSwap(hashMapData[slot].z, HASHMAP_EMPTY, value)
-//   3. If won: write key_high, key_low to .x, .y
-//   4. If lost: memoryBarrierBuffer(), check if keys match (duplicate or collision)
-//   5. Linear probe on collision: slot = (slot + 1) & mask
+// Insert protocol (passes 1-2):
+//   1. slot = key & (mapSize - 1), linear probe on collision
+//   2. atomicCompSwap(slot.x, HASHMAP_EMPTY, key) to claim
+//   3. If won: write value to .y
+//   4. If lost: check if .x matches key, verify with full equality check
+//
+// Insert protocol (pass 4):
+//   Same, but key is two vertex indices (.x = vMin, .y = vMax),
+//   value (.z) is the allocated edge index.
 // ============================================================================
 
 // ============================================================================
 // Utility
 // ============================================================================
+
+// Adjacency packing: triangle index in upper 30 bits, vertex slot (0-2) in lower 2 bits
+#define ADJ_PACK(triIdx, slot)   (((triIdx) << 2) | (slot))
+#define ADJ_TRI(packed)          ((packed) >> 2)
+#define ADJ_SLOT(packed)         ((packed) & 3u)
 
 // Pack two uint16s into one uint32
 uint pack_u16(uint a, uint b) {

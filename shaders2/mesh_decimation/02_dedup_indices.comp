@@ -10,18 +10,14 @@
 // Phase A: Remap IB using vertexMap (full attribute dedup).
 // Phase B: Build position-only hash map, generate PB, flag discontinuities.
 //
-// NOTE: The position hash map uses the SECOND HALF of hashMapData
-//       (offset = hashMapSize) so we don't conflict with Phase 1's map.
-//       The host must allocate hashMapData with 2 * hashMapSize entries
-//       and clear the second half before this dispatch.
+// The position hash map uses its own SSBO (positionHashMap), separate from
+// the vertex hash map used in Pass 1.
 // ============================================================================
 
 #include "common.glsl"
 #include "bindings.glsl"
 
 layout(local_size_x = WORKGROUP_SIZE) in;
-
-#define POS_MAP_OFFSET hashMapSize
 
 void main() {
     uint gid = gl_GlobalInvocationID.x;
@@ -41,39 +37,35 @@ void main() {
         uint vertIdx = indices[baseIdx + i];
         Vertex v = loadVertex(vertIdx);
 
-        uint posHash = hash_position(v.pos);
-        uint key_high = posHash;
-        uint key_low  = hash_combine(hash_float(v.pos.y), hash_float(v.pos.z));
-
+        uint key = hash_position(v.pos);
         uint mask = hashMapSize - 1u;
-        uint slot = murmur_mix(key_high ^ key_low) & mask;
+        uint slot = key & mask;
 
-        uint posCanonical = vertIdx;  // default: self
+        uint posCanonical = vertIdx;
 
         for (uint probe = 0u; probe < MAX_PROBES; probe++) {
-            uint s = POS_MAP_OFFSET + ((slot + probe) & mask);
+            uint s = (slot + probe) & mask;
 
-            uint prev = atomicCompSwap(hashMapData[s].z, HASHMAP_EMPTY, vertIdx);
+            uint prev = atomicCompSwap(positionHashMap[s].x, HASHMAP_EMPTY, key);
 
             if (prev == HASHMAP_EMPTY) {
-                // First vertex at this position
-                hashMapData[s].x = key_high;
-                hashMapData[s].y = key_low;
+                positionHashMap[s].y = vertIdx;
                 posCanonical = vertIdx;
                 break;
             }
 
-            memoryBarrierBuffer();
+            if (prev == key) {
+                uint existingIdx = positionHashMap[s].y;
+                while (existingIdx == HASHMAP_EMPTY) {
+                    memoryBarrierBuffer();
+                    existingIdx = positionHashMap[s].y;
+                }
 
-            if (hashMapData[s].x == key_high && hashMapData[s].y == key_low) {
-                uint existingIdx = hashMapData[s].z;
                 Vertex existing = loadVertex(existingIdx);
 
                 if (positions_equal(v.pos, existing.pos)) {
                     posCanonical = existingIdx;
 
-                    // If full-attribute indices differ but positions match,
-                    // this is a discontinuity (e.g., UV seam, hard normal edge)
                     if (vertIdx != existingIdx) {
                         atomicOr(vertexFlags[vertIdx], FLAG_DISCONTINUITY);
                         atomicOr(vertexFlags[existingIdx], FLAG_DISCONTINUITY);
@@ -83,7 +75,6 @@ void main() {
             }
         }
 
-        // Write position-only index buffer
         posIndices[baseIdx + i] = posCanonical;
         posMap[vertIdx] = posCanonical;
     }

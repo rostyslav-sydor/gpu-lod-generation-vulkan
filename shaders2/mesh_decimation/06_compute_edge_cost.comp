@@ -30,19 +30,83 @@
 
 layout(local_size_x = WORKGROUP_SIZE) in;
 
-// Count triangles adjacent to a vertex by walking its adjacency list
 uint countAdjacent(uint vertIdx) {
     uint count = 0u;
-    uint triIdx = adjHead[vertIdx];
-    while (triIdx != NONE && count < 64u) {
+    uint packed = adjHead[vertIdx];
+    while (packed != NONE && count < 64u) {
         count++;
-        // Find which slot (0,1,2) of this triangle references vertIdx
-        uint base = triIdx * 3u;
-        if (posIndices[base + 0u] == vertIdx)      triIdx = triAdjNext[base + 0u];
-        else if (posIndices[base + 1u] == vertIdx)  triIdx = triAdjNext[base + 1u];
-        else                                         triIdx = triAdjNext[base + 2u];
+        packed = triAdjNext[ADJ_TRI(packed) * 3u + ADJ_SLOT(packed)];
     }
     return count;
+}
+
+// Check that moving vertIdx -> newPos doesn't flip any adjacent triangle.
+// Triangles containing otherVert are skipped (they share the collapse edge
+// and will become degenerate, handled by pass 10).
+bool checkFlips(uint vertIdx, vec3 oldPos, uint otherVert, vec3 newPos) {
+    uint packed = adjHead[vertIdx];
+    uint safety = 0u;
+    while (packed != NONE && safety < 64u) {
+        safety++;
+        uint triIdx = ADJ_TRI(packed);
+        uint slot   = ADJ_SLOT(packed);
+
+        uint i0 = indices[triIdx * 3u + 0u];
+        uint i1 = indices[triIdx * 3u + 1u];
+        uint i2 = indices[triIdx * 3u + 2u];
+
+        if (i0 == otherVert || i1 == otherVert || i2 == otherVert) {
+            packed = triAdjNext[triIdx * 3u + slot];
+            continue;
+        }
+
+        vec3 pa, pb;
+        if      (i0 == vertIdx) { pa = loadVertex(i1).pos; pb = loadVertex(i2).pos; }
+        else if (i1 == vertIdx) { pa = loadVertex(i0).pos; pb = loadVertex(i2).pos; }
+        else                    { pa = loadVertex(i0).pos; pb = loadVertex(i1).pos; }
+
+        vec3 oldN = cross(pa - oldPos,  pb - oldPos);
+        vec3 newN = cross(pa - newPos,  pb - newPos);
+
+        // Block if the triangle would flip its normal
+        if (dot(oldN, newN) <= 0.0) return false;
+
+        packed = triAdjNext[triIdx * 3u + slot];
+    }
+    return true;
+}
+
+// Solve QEM for optimal position, with fallback to best of v0/v1/mid.
+// Returns cost and writes optPos.
+float solveQEM(Quadric qe, vec3 p0, vec3 p1, out vec3 optPos) {
+    vec3 mid = (p0 + p1) * 0.5;
+    float edgeLen = length(p1 - p0);
+    float cost;
+
+    bool invertible = quadric_optimal(qe, optPos);
+    if (invertible && length(optPos - mid) > edgeLen) {
+        invertible = false;
+    }
+
+    if (invertible) {
+        cost = quadric_evaluate(qe, optPos);
+    } else {
+        float c0 = quadric_evaluate(qe, p0);
+        float c1 = quadric_evaluate(qe, p1);
+        float cm = quadric_evaluate(qe, mid);
+        if (c0 <= c1 && c0 <= cm)      { cost = c0; optPos = p0; }
+        else if (c1 <= cm)              { cost = c1; optPos = p1; }
+        else                            { cost = cm; optPos = mid; }
+    }
+    return max(cost, 0.0);
+}
+
+// Get face normal (unnormalized) for a triangle by index
+vec3 getTriNormal(uint triIdx) {
+    vec3 a = loadVertex(indices[triIdx * 3u + 0u]).pos;
+    vec3 b = loadVertex(indices[triIdx * 3u + 1u]).pos;
+    vec3 c = loadVertex(indices[triIdx * 3u + 2u]).pos;
+    return cross(b - a, c - a);
 }
 
 void main() {
@@ -56,108 +120,112 @@ void main() {
     uint flags0 = vertexFlags[v0];
     uint flags1 = vertexFlags[v1];
 
-    // --- Topology checks ---
     uint eFlags = 0u;
-
-    // Check if this is a boundary edge
     bool isBoundary = (edgeTriangles[gid * 2u + 1u] == NONE);
-    if (isBoundary) {
-        eFlags |= EDGE_BOUNDARY;
+    if (isBoundary) eFlags |= EDGE_BOUNDARY;
+
+    uint valence0 = countAdjacent(v0);
+    uint valence1 = countAdjacent(v1);
+    if ((valence0 + valence1) > 24u) {
+        edgeCost[gid] = 1e30;
+        edgeFlags[gid] = eFlags;
+        return;
     }
-
-    // Discontinuity preservation:
-    // If one vertex is a discontinuity and the other is not, collapsing
-    // would alter the topology of the discontinuity — not eligible.
-    bool disc0 = (flags0 & FLAG_DISCONTINUITY) != 0u;
-    bool disc1 = (flags1 & FLAG_DISCONTINUITY) != 0u;
-
-    bool topologyOk = true;
-
-    if (disc0 != disc1) {
-        // One is discontinuity, other isn't — can't collapse
-        topologyOk = false;
-    }
-
-    // Boundary preservation:
-    // If one vertex is on a boundary and the other isn't, don't collapse
-    bool bnd0 = (flags0 & FLAG_BOUNDARY) != 0u;
-    bool bnd1 = (flags1 & FLAG_BOUNDARY) != 0u;
-    if (bnd0 != bnd1) {
-        topologyOk = false;
-    }
-
-    // On boundary edges, only collapse if both endpoints are boundary vertices
-    if (isBoundary && !(bnd0 && bnd1)) {
-        topologyOk = false;
-    }
-
-    // --- Compute QEM cost ---
-    Quadric q0 = loadQuadric(v0);
-    Quadric q1 = loadQuadric(v1);
-    Quadric qe = quadric_add(q0, q1);
 
     Vertex vert0 = loadVertex(v0);
     Vertex vert1 = loadVertex(v1);
     vec3 mid = (vert0.pos + vert1.pos) * 0.5;
     float edgeLen = length(vert1.pos - vert0.pos);
 
+    // --- Soft topology penalties (shared by all modes) ---
+    float costPenalty = 1.0;
+    bool disc0 = (flags0 & FLAG_DISCONTINUITY) != 0u;
+    bool disc1 = (flags1 & FLAG_DISCONTINUITY) != 0u;
+    bool bnd0  = (flags0 & FLAG_BOUNDARY) != 0u;
+    bool bnd1  = (flags1 & FLAG_BOUNDARY) != 0u;
+    if (disc0 != disc1) costPenalty *= 100.0;
+    if (bnd0 != bnd1)   costPenalty *= 100.0;
+    if (isBoundary && !(bnd0 && bnd1)) costPenalty *= 100.0;
+
     vec3 optPos;
     float cost;
 
-    bool invertible = quadric_optimal(qe, optPos);
-
-    // Reject if optimal position is far from the edge (residual numerical instability)
-    if (invertible && length(optPos - mid) > edgeLen) {
-        invertible = false;
+    // =====================================================================
+    // Mode 0: QEM — sqrt(area)-weighted quadrics + soft penalties
+    // =====================================================================
+    if (costMode == COST_MODE_QEM) {
+        Quadric qe = quadric_add(loadQuadric(v0), loadQuadric(v1));
+        cost = solveQEM(qe, vert0.pos, vert1.pos, optPos) * costPenalty;
     }
+    // =====================================================================
+    // Mode 1: Paper — dihedral angle + edge length + valence
+    // =====================================================================
+    else if (costMode == COST_MODE_PAPER) {
+        // Dihedral angle: angle between normals of the two triangles sharing this edge.
+        // For boundary edges (one triangle), curvature contribution is maximal.
+        float dihedralCost = 1.0;
+        uint tri0 = edgeTriangles[gid * 2u + 0u];
+        uint tri1 = edgeTriangles[gid * 2u + 1u];
+        if (tri0 != NONE && tri1 != NONE) {
+            vec3 n0 = getTriNormal(tri0);
+            vec3 n1 = getTriNormal(tri1);
+            float len0 = length(n0);
+            float len1 = length(n1);
+            if (len0 > 1e-12 && len1 > 1e-12) {
+                float cosA = dot(n0, n1) / (len0 * len1);
+                dihedralCost = 1.0 - clamp(cosA, -1.0, 1.0);
+            }
+        }
 
-    if (invertible) {
-        cost = quadric_evaluate(qe, optPos);
-    } else {
-        float c0 = quadric_evaluate(qe, vert0.pos);
-        float c1 = quadric_evaluate(qe, vert1.pos);
-        float cm = quadric_evaluate(qe, mid);
+        // Valence penalty: deviation from ideal valence of 6
+        float idealValence = 6.0;
+        float mergedValence = float(valence0 + valence1) - 2.0;
+        float valenceDev = abs(mergedValence - idealValence) / idealValence;
 
-        if (c0 <= c1 && c0 <= cm) {
-            cost = c0;
-            optPos = vert0.pos;
-        } else if (c1 <= cm) {
-            cost = c1;
-            optPos = vert1.pos;
+        // Cost = curvature * edge_length * (1 + valence_penalty)
+        cost = dihedralCost * edgeLen * (1.0 + valenceDev) * costPenalty;
+        optPos = mid;
+    }
+    // =====================================================================
+    // Mode 2: Meshopt-like — evaluate error at endpoint positions, normalize
+    // by individual vertex weight, pick the direction with less error.
+    // Border walls and face quadrics (w=0) accumulated in pass 5.
+    // =====================================================================
+    else {
+        Quadric q0 = loadQuadric(v0);
+        Quadric q1 = loadQuadric(v1);
+        float w0 = max(q0.q[10], 1e-6);
+        float w1 = max(q1.q[10], 1e-6);
+
+        // meshopt evaluates error of placing source vertex at target position
+        float e0to1 = abs(quadric_evaluate(q0, vert1.pos)) / w0;
+        float e1to0 = abs(quadric_evaluate(q1, vert0.pos)) / w1;
+
+        if (e0to1 <= e1to0) {
+            cost = e0to1 * costPenalty;
+            optPos = vert1.pos; // v0 collapses into v1, v1 keeps its position
         } else {
-            cost = cm;
-            optPos = mid;
+            cost = e1to0 * costPenalty;
+            optPos = vert0.pos; // v1 collapses into v0, v0 keeps its position
         }
     }
 
-    // Clamp negative costs (numerical noise)
-    cost = max(cost, 0.0);
+    // --- Flip check (all modes) ---
+    if (!checkFlips(v0, vert0.pos, v1, optPos) ||
+        !checkFlips(v1, vert1.pos, v0, optPos)) {
+        edgeCost[gid] = 1e30;
+        edgeFlags[gid] = eFlags;
+        return;
+    }
 
     edgeCost[gid] = cost;
 
-    // --- Valence check ---
-    // Prevent creating vertices with very high valence
-    uint valence0 = countAdjacent(v0);
-    uint valence1 = countAdjacent(v1);
-    // After collapse, rough new valence = valence0 + valence1 - 4 (for manifold interior)
-    bool valenceOk = (valence0 + valence1) <= 24u;
-
-    // --- Eligibility ---
-    bool eligible = topologyOk && valenceOk && (cost < costThreshold);
+    // --- Eligibility (all modes) ---
+    bool eligible = cost < costThreshold;
     if (eligible) {
         eFlags |= EDGE_ELIGIBLE;
-    }
 
-    edgeFlags[gid] = eFlags;
-
-    // Store optimal collapse target
-    if (eligible) {
-        Vertex vert0 = loadVertex(v0);
-        Vertex vert1 = loadVertex(v1);
-
-        // Compute interpolation factor from optimal position
         float t = (edgeLen > 1e-10) ? clamp(length(optPos - vert0.pos) / edgeLen, 0.0, 1.0) : 0.5;
-
         vec3 optNormal = normalize(mix(vert0.normal, vert1.normal, t));
         vec2 optTexCoord = mix(vert0.texCoord, vert1.texCoord, t);
 
@@ -165,4 +233,6 @@ void main() {
         edgeTarget[gid * 3u + 1u] = vec4(optNormal, 0.0);
         edgeTarget[gid * 3u + 2u] = vec4(optTexCoord, 0.0, 0.0);
     }
+
+    edgeFlags[gid] = eFlags;
 }

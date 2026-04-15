@@ -33,3 +33,5 @@ test-wsl: VulkanLOD
 
 clean:
 	rm -f VulkanLOD
+	rm -f shaders/*.spv
+	rm -f $(DECIMATION_DIR)/*.spv
