@@ -1,0 +1,61 @@
+#version 460
+#extension GL_EXT_shader_atomic_int64 : require
+
+// ============================================================================
+// Pass 8: Select Collapse Candidates via Atomic Min
+//
+// Dispatch: ceil(edgeCount / WORKGROUP_SIZE) workgroups
+// 1 thread per edge.
+//
+// For each ELIGIBLE edge, constructs a 64-bit descriptor encoding the cost
+// in the upper 32 bits and the edge index in the lower 32 bits. Then walks
+// the adjacency lists of both endpoints and performs atomicMin on every
+// adjacent triangle's descriptor.
+//
+// Cost quantization: the upper cost bits are rounded to ~11 significant bits
+// (sign + exponent + 2 mantissa). This creates cost "buckets" so that edges
+// with similar costs can co-exist in overlapping neighborhoods, increasing
+// the number of collapses per iteration.
+//
+// Prerequisites:
+//   - triDescriptor[] initialized to MAX from Pass 7
+//   - edgeFlags[], edgeCost[] from Pass 6
+//   - adjHead[], triAdjNext[] from Pass 3
+//
+// Result:
+//   triDescriptor[t] = descriptor of the lowest-cost eligible edge
+//                       in the neighborhood of triangle t
+// ============================================================================
+
+#include "common.glsl"
+#include "bindings.glsl"
+
+layout(local_size_x = WORKGROUP_SIZE) in;
+
+void updateVertex(uint vertIdx, uint64_t descriptor) {
+    uint packed = adjHead[vertIdx];
+    uint safety = 0u;
+
+    while (packed != NONE && safety < 256u) {
+        uint triIdx = ADJ_TRI(packed);
+        atomicMin(triDescriptor[triIdx], descriptor);
+        packed = triAdjNext[triIdx * 3u + ADJ_SLOT(packed)];
+        safety++;
+    }
+}
+
+void main() {
+    uint gid = gl_GlobalInvocationID.x;
+    if (gid >= edgeCount) return;
+
+    if ((edgeFlags[gid] & EDGE_ELIGIBLE) == 0u) return;
+
+    float cost = edgeCost[gid];
+
+    uint costBits = floatBitsToUint(cost);
+    uint64_t descriptor = (uint64_t(costBits) << 32) | uint64_t(gid);
+
+    uvec2 edge = edges[gid];
+    updateVertex(edge.x, descriptor);
+    updateVertex(edge.y, descriptor);
+}
