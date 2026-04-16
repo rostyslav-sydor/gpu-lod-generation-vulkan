@@ -8,8 +8,13 @@
 // 1 thread per triangle.
 //
 // For each triangle, computes the plane equation and its fundamental quadric
-// matrix weighted by sqrt(area), then atomically accumulates it into each
-// vertex's quadric. Also detects boundary edges and flags vertices.
+// matrix weighted by sqrt(area), then accumulates it into each vertex's
+// quadric via a workgroup-local shared-memory hash map. The shared map is
+// flushed to global memory once per workgroup, converting O(3T) global
+// atomics into O(V_unique) global atomics per workgroup.
+//
+// Also detects boundary edges and flags vertices (using global memory
+// directly, since boundary edges are rare).
 //
 // Prerequisites:
 //   - quadricsData[] must be cleared to 0 before dispatch.
@@ -17,7 +22,7 @@
 //   - edgeHashMap[], edgeTriangles[] from Pass 4.
 //
 // Result:
-//   quadricsData[v*10..v*10+9] = sum of plane quadrics of all adjacent triangles
+//   quadricsData[v*QUADRIC_FIELDS..] = sum of plane quadrics of all adjacent tris
 //   vertexFlags: FLAG_BOUNDARY set on vertices of boundary edges
 // ============================================================================
 
@@ -25,6 +30,40 @@
 #include "bindings.glsl"
 
 layout(local_size_x = WORKGROUP_SIZE) in;
+
+// ============================================================================
+// Shared-memory quadric accumulation
+//
+// 512-slot open-addressing hash map keyed by vertex index.
+// Each slot: 1 uint key + QUADRIC_FIELDS ints (fixed-point).
+// Total: 512 * (4 + 44) = 24 KB shared memory.
+// Shared-memory atomics are ~20x faster than global on NVIDIA/AMD.
+// ============================================================================
+
+#define SMAP_SIZE 512u
+#define SMAP_MASK (SMAP_SIZE - 1u)
+#define SMAP_MAX_PROBE 32u
+
+shared uint smapKey[SMAP_SIZE];
+shared int  smapVal[SMAP_SIZE * QUADRIC_FIELDS];
+
+void smapAdd(uint vertIdx, Quadric qr) {
+    uint h = vertIdx & SMAP_MASK;
+    for (uint p = 0u; p < SMAP_MAX_PROBE; p++) {
+        uint s = (h + p) & SMAP_MASK;
+        uint prev = atomicCompSwap(smapKey[s], NONE, vertIdx);
+        if (prev == NONE || prev == vertIdx) {
+            uint base = s * uint(QUADRIC_FIELDS);
+            for (int i = 0; i < QUADRIC_FIELDS; i++) {
+                atomicAdd(smapVal[base + uint(i)], int(round(qr.q[i] * QUADRIC_SCALE)));
+            }
+            return;
+        }
+    }
+    atomicAddQuadric(vertIdx, qr);
+}
+
+// ============================================================================
 
 bool isEdgeBoundary(uint v0, uint v1, uint hmMask) {
     uint eMin = min(v0, v1);
@@ -43,46 +82,77 @@ bool isEdgeBoundary(uint v0, uint v1, uint hmMask) {
 }
 
 void main() {
+    uint tid = gl_LocalInvocationID.x;
     uint gid = gl_GlobalInvocationID.x;
-    if (gid >= triangleCount) return;
 
-    uint baseIdx = gid * 3u;
+    // --- Initialize shared map (all threads participate) ---
+    for (uint t = tid; t < SMAP_SIZE; t += WORKGROUP_SIZE)
+        smapKey[t] = NONE;
+    uint totalVals = SMAP_SIZE * uint(QUADRIC_FIELDS);
+    for (uint t = tid; t < totalVals; t += WORKGROUP_SIZE)
+        smapVal[t] = 0;
+    barrier();
 
-    uint i0 = posIndices[baseIdx + 0u];
-    uint i1 = posIndices[baseIdx + 1u];
-    uint i2 = posIndices[baseIdx + 2u];
+    // --- Load triangle, compute face quadric, accumulate in shared map ---
+    bool valid = (gid < triangleCount);
+    bool nonDegenerate = false;
 
-    vec3 p0 = loadVertex(i0).pos;
-    vec3 p1 = loadVertex(i1).pos;
-    vec3 p2 = loadVertex(i2).pos;
+    uint i0, i1, i2;
+    vec3 p0, p1, p2;
+    vec4 plane;
+    float area2;
 
-    vec3 edge1 = p1 - p0;
-    vec3 edge2 = p2 - p0;
-    vec3 n = cross(edge1, edge2);
-    float area2 = length(n);
+    if (valid) {
+        uint baseIdx = gid * 3u;
+        i0 = posIndices[baseIdx + 0u];
+        i1 = posIndices[baseIdx + 1u];
+        i2 = posIndices[baseIdx + 2u];
 
-    if (area2 < 1e-12) return;
+        p0 = loadVertex(i0).pos;
+        p1 = loadVertex(i1).pos;
+        p2 = loadVertex(i2).pos;
 
-    n /= area2;
-    float d = -dot(n, p0);
-    vec4 plane = vec4(n, d);
+        vec3 edge1 = p1 - p0;
+        vec3 edge2 = p2 - p0;
+        vec3 n = cross(edge1, edge2);
+        area2 = length(n);
 
-    if (costMode != COST_MODE_PAPER) {
-        Quadric qr = quadric_from_plane(plane);
+        nonDegenerate = (area2 >= 1e-12);
 
-        float weight = sqrt(area2 * 0.5);
-        for (int i = 0; i < 10; i++) {
-            qr.q[i] *= weight;
+        if (nonDegenerate) {
+            n /= area2;
+            float d = -dot(n, p0);
+            plane = vec4(n, d);
+
+            if (costMode != COST_MODE_PAPER) {
+                Quadric qr = quadric_from_plane(plane);
+                float weight = sqrt(area2 * 0.5);
+                for (int i = 0; i < 10; i++) qr.q[i] *= weight;
+                qr.q[10] = weight;
+
+                smapAdd(i0, qr);
+                smapAdd(i1, qr);
+                smapAdd(i2, qr);
+            }
         }
-        qr.q[10] = weight;
-
-        atomicAddQuadric(i0, qr);
-        atomicAddQuadric(i1, qr);
-        atomicAddQuadric(i2, qr);
     }
 
-    // --- Detect boundary edges and flag vertices (every iteration) ---
-    // Border wall quadrics only on iteration 0 (persist via transfer like face quadrics)
+    // --- Flush shared map to global (all threads participate) ---
+    barrier();
+    for (uint t = tid; t < SMAP_SIZE; t += WORKGROUP_SIZE) {
+        if (smapKey[t] != NONE) {
+            uint vertIdx = smapKey[t];
+            uint gBase = vertIdx * uint(QUADRIC_FIELDS);
+            uint sBase = t * uint(QUADRIC_FIELDS);
+            for (int i = 0; i < QUADRIC_FIELDS; i++) {
+                atomicAdd(quadricsData[gBase + uint(i)], smapVal[sBase + uint(i)]);
+            }
+        }
+    }
+
+    // --- Boundary detection (global memory, only valid non-degenerate triangles) ---
+    if (!valid || !nonDegenerate) return;
+
     uint mask = hashMapSize - 1u;
     if (isEdgeBoundary(i0, i1, mask)) {
         atomicOr(vertexFlags[i0], FLAG_BOUNDARY);
