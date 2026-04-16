@@ -34,31 +34,6 @@ uint countAdjacent(uint vertIdx) {
     return triEdges[vertIdx] - adjHead[vertIdx];
 }
 
-// Cheap flip check: only test the 2 triangles directly sharing this edge.
-// Loads 1 opposite vertex per triangle (3 index reads + 1 vertex read).
-bool checkEdgeFlips(uint triIdx, uint v0, uint v1, vec3 p0, vec3 p1, vec3 optPos) {
-    if (triIdx == NONE) return true;
-
-    uint i0 = indices[triIdx * 3u + 0u];
-    uint i1 = indices[triIdx * 3u + 1u];
-    uint i2 = indices[triIdx * 3u + 2u];
-
-    vec3 opp;
-    if      (i0 != v0 && i0 != v1) opp = loadVertex(i0).pos;
-    else if (i1 != v0 && i1 != v1) opp = loadVertex(i1).pos;
-    else                            opp = loadVertex(i2).pos;
-
-    vec3 oldN = cross(p1 - p0, opp - p0);
-    vec3 newN = cross(p1 - optPos, opp - optPos);
-    if (dot(oldN, newN) <= 0.0) return false;
-
-    oldN = cross(p0 - p1, opp - p1);
-    newN = cross(optPos - p1, opp - p1);
-    if (dot(oldN, newN) <= 0.0) return false;
-
-    return true;
-}
-
 // Solve QEM for optimal position, with fallback to best of v0/v1/mid.
 // Returns cost and writes optPos.
 float solveQEM(Quadric qe, vec3 p0, vec3 p1, out vec3 optPos) {
@@ -193,17 +168,8 @@ void main() {
         }
     }
 
-    // --- Early exit: skip flip check for edges that are too costly ---
     if (cost >= costThreshold) {
         edgeCost[gid] = cost;
-        edgeFlags[gid] = eFlags;
-        return;
-    }
-
-    // --- Cheap flip check: only the 2 triangles sharing this edge ---
-    if (!checkEdgeFlips(eTri0, v0, v1, vert0.pos, vert1.pos, optPos) ||
-        !checkEdgeFlips(eTri1, v0, v1, vert0.pos, vert1.pos, optPos)) {
-        edgeCost[gid] = 1e30;
         edgeFlags[gid] = eFlags;
         return;
     }
