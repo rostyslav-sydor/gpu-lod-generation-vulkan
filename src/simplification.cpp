@@ -772,6 +772,8 @@ void App::runDecimation() {
     for (uint32_t iteration = 0; iteration < maxDecimationIterations; iteration++) {
         Timer iterTimer;
         std::cout << "  iter " << iteration << ": passes 3-4..." << std::flush;
+        bool refreshQuadrics = (iteration % quadricRefreshInterval == 0);
+
         // --- Phase A: Build adjacency (linked list) + edge build ---
         {
             VkCommandBuffer cmd = beginCmd();
@@ -780,7 +782,7 @@ void App::runDecimation() {
 
             vkCmdFillBuffer(cmd, decimationBufs[DB_ADJ_HEAD], 0, decimationBufSizes[DB_ADJ_HEAD], 0xFFFFFFFF);
             vkCmdFillBuffer(cmd, decimationBufs[DB_HASHMAP_EDGE], 0, edgeHashMapSize, 0xFFFFFFFF);
-            if (iteration == 0)
+            if (refreshQuadrics)
                 vkCmdFillBuffer(cmd, decimationBufs[DB_QUADRIC], 0, decimationBufSizes[DB_QUADRIC], 0);
             vkCmdFillBuffer(cmd, decimationBufs[DB_COUNTER], 0, decimationBufSizes[DB_COUNTER], 0);
 
@@ -850,8 +852,8 @@ void App::runDecimation() {
 
             vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, timestampQueryPool, 3);
             for (int pi = 0; pi < 8; pi++) {
-                if (pi == 0 && iteration > 0) {
-                    // Skip P5 on subsequent iterations — quadrics merged in P9
+                if (pi == 0 && !refreshQuadrics) {
+                    // Skip P5 — quadrics merged incrementally in P9
                     vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, timestampQueryPool, 4 + pi);
                     continue;
                 }

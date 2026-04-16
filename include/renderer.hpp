@@ -62,6 +62,7 @@ inline uint32_t maxDecimationIterations = std::getenv("DECIM_NUM") ? std::stoi(s
 inline float decimationGrowthRate = std::getenv("DECIM_GROW") ? std::stof(std::getenv("DECIM_GROW")) : 1.0f;
 inline bool useCPUDecimation = (std::getenv("CPU_DECIM") ? std::string(std::getenv("CPU_DECIM")) != "0" : false);
 inline uint32_t decimationCostMode = std::getenv("DECIM_MODE") ? std::stoi(std::getenv("DECIM_MODE")) : 0;
+inline uint32_t quadricRefreshInterval = std::getenv("DECIM_REFRESH") ? std::stoi(std::getenv("DECIM_REFRESH")) : 5;
 
 const bool deviceLocalBuffer = false;
 const bool singleBuffer = false;
