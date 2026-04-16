@@ -94,14 +94,6 @@ void main() {
     // Replace v1 with v0 in all adjacent triangles of v1
     replaceInAdjacent(v1, v0);
 
-    // Merge v1's quadric into v0: Q(v_merged) = Q(v0) + Q(v1)
-    // Standard QEM — quadrics accumulate through collapses, never recomputed.
-    uint baseV0q = v0 * uint(QUADRIC_FIELDS);
-    uint baseV1q = v1 * uint(QUADRIC_FIELDS);
-    for (int i = 0; i < QUADRIC_FIELDS; i++) {
-        quadricsData[baseV0q + uint(i)] += quadricsData[baseV1q + uint(i)];
-    }
-
     // Mark v1 as collapsed
     atomicOr(vertexFlags[v1], FLAG_COLLAPSED);
 
