@@ -2,23 +2,23 @@
 #extension GL_EXT_shader_atomic_int64 : require
 
 // ============================================================================
-// Pass 3: Count Per-Vertex Triangle Adjacency (CSR build, phase 1)
+// Pass 3b: Scatter Adjacency Entries into Flat CSR Array (phase 2)
 //
 // Dispatch: ceil(triangleCount / WORKGROUP_SIZE) workgroups
 // 1 thread per triangle.
 //
-// For each triangle in PB, atomically increments the adjacency count
-// for each of its 3 vertices.
+// For each triangle, atomically claims a write position in the flat
+// adjacency array for each of its 3 vertices and writes the packed
+// (triIdx, slot) entry there.
 //
 // Prerequisites:
-//   - adjHead[] must be cleared to 0 before dispatch.
-//   - posIndices[] (PB) must be populated from Pass 2.
+//   - adjHead[] must contain exclusive prefix-sum offsets (from host).
+//   - triEdges[] must contain a copy of adjHead[] (write positions).
+//   - posIndices[] (PB) populated.
 //
 // Result:
-//   adjHead[v] = number of triangles adjacent to vertex v
-//
-// After this pass, the host computes an exclusive prefix sum on adjHead[]
-// to produce CSR offsets, then dispatches the scatter pass (03b).
+//   triAdjNext[offset..] = packed(triIdx, slot) entries, contiguous per vertex
+//   triEdges[v] = adjHead[v] + count_v (end offset for vertex v)
 // ============================================================================
 
 #include "common.glsl"
@@ -34,6 +34,7 @@ void main() {
 
     for (uint k = 0u; k < 3u; k++) {
         uint vertIdx = posIndices[baseIdx + k];
-        atomicAdd(adjHead[vertIdx], 1u);
+        uint pos = atomicAdd(triEdges[vertIdx], 1u);
+        triAdjNext[pos] = ADJ_PACK(gid, k);
     }
 }

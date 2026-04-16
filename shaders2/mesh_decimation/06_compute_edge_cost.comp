@@ -31,31 +31,22 @@
 layout(local_size_x = WORKGROUP_SIZE) in;
 
 uint countAdjacent(uint vertIdx) {
-    uint count = 0u;
-    uint packed = adjHead[vertIdx];
-    while (packed != NONE && count < 64u) {
-        count++;
-        packed = triAdjNext[ADJ_TRI(packed) * 3u + ADJ_SLOT(packed)];
-    }
-    return count;
+    return triEdges[vertIdx] - adjHead[vertIdx];
 }
 
 bool checkFlips(uint vertIdx, vec3 oldPos, uint otherVert, vec3 newPos) {
-    uint packed = adjHead[vertIdx];
-    uint safety = 0u;
-    while (packed != NONE && safety < 64u) {
-        safety++;
+    uint start = adjHead[vertIdx];
+    uint end   = triEdges[vertIdx];
+    for (uint i = start; i < end; i++) {
+        uint packed = triAdjNext[i];
         uint triIdx = ADJ_TRI(packed);
-        uint slot   = ADJ_SLOT(packed);
 
         uint i0 = indices[triIdx * 3u + 0u];
         uint i1 = indices[triIdx * 3u + 1u];
         uint i2 = indices[triIdx * 3u + 2u];
 
-        if (i0 == otherVert || i1 == otherVert || i2 == otherVert) {
-            packed = triAdjNext[triIdx * 3u + slot];
+        if (i0 == otherVert || i1 == otherVert || i2 == otherVert)
             continue;
-        }
 
         vec3 pa, pb;
         if      (i0 == vertIdx) { pa = loadVertex(i1).pos; pb = loadVertex(i2).pos; }
@@ -66,8 +57,6 @@ bool checkFlips(uint vertIdx, vec3 oldPos, uint otherVert, vec3 newPos) {
         vec3 newN = cross(pa - newPos,  pb - newPos);
 
         if (dot(oldN, newN) <= 0.25 * sqrt(dot(oldN, oldN) * dot(newN, newN))) return false;
-
-        packed = triAdjNext[triIdx * 3u + slot];
     }
     return true;
 }

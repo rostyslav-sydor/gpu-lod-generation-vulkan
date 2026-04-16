@@ -35,34 +35,27 @@
 layout(local_size_x = WORKGROUP_SIZE) in;
 
 bool checkVertex(uint vertIdx, uint64_t descriptor) {
-    uint packed = adjHead[vertIdx];
-    uint safety = 0u;
-
-    while (packed != NONE && safety < 256u) {
-        uint triIdx = ADJ_TRI(packed);
-        if (triDescriptor[triIdx] != descriptor) {
+    uint start = adjHead[vertIdx];
+    uint end   = triEdges[vertIdx];
+    for (uint i = start; i < end; i++) {
+        uint triIdx = ADJ_TRI(triAdjNext[i]);
+        if (triDescriptor[triIdx] != descriptor)
             return false;
-        }
-        packed = triAdjNext[triIdx * 3u + ADJ_SLOT(packed)];
-        safety++;
     }
     return true;
 }
 
 void replaceInAdjacent(uint oldVert, uint newVert) {
-    uint packed = adjHead[oldVert];
-    uint safety = 0u;
-
-    while (packed != NONE && safety < 256u) {
+    uint start = adjHead[oldVert];
+    uint end   = triEdges[oldVert];
+    for (uint i = start; i < end; i++) {
+        uint packed = triAdjNext[i];
         uint triIdx = ADJ_TRI(packed);
-        uint slot = ADJ_SLOT(packed);
-        uint base = triIdx * 3u;
+        uint slot   = ADJ_SLOT(packed);
+        uint base   = triIdx * 3u;
 
         posIndices[base + slot] = newVert;
         indices[base + slot] = newVert;
-
-        packed = triAdjNext[base + slot];
-        safety++;
     }
 }
 

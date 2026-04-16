@@ -26,15 +26,16 @@ layout(set = 0, binding = 3) buffer VertexFlagsBuffer {
     uint vertexFlags[];
 };
 
-// B4: Per-vertex adjacency list head
+// B4: Per-vertex CSR adjacency offset (start index into adjData)
+// After prefix sum: adjHead[v] = start offset for vertex v's adjacency entries
 layout(set = 0, binding = 4) buffer AdjHeadBuffer {
     uint adjHead[];
 };
 
-// B5: Per-triangle adjacency next pointers (packed as 3 uints per triangle)
-// Each entry is packed: (triIdx << 2 | slot), where slot is 0/1/2
+// B5: Flat CSR adjacency data — packed (triIdx << 2 | slot) entries, contiguous per vertex
+// Vertex v's entries: triAdjNext[adjHead[v] .. triEdges[v]-1]
 layout(set = 0, binding = 5) buffer TriAdjNextBuffer {
-    uint triAdjNext[];   // [triIdx*3 + k] = packed(nextTri, nextSlot)
+    uint triAdjNext[];
 };
 
 // B6: Unique edge list — uvec2(v0, v1) per edge, using position indices
@@ -47,8 +48,9 @@ layout(set = 0, binding = 7) buffer EdgeTriBuffer {
     uint edgeTriangles[];  // [edgeIdx*2+0] = tri0, [edgeIdx*2+1] = tri1
 };
 
-// B8: Unused
-layout(set = 0, binding = 8) buffer TriEdgeBuffer {
+// B8: Per-vertex CSR adjacency end offset (= adjHead[v] + count_v)
+// Used as atomic write position during scatter, then as end pointer for traversal
+layout(set = 0, binding = 8) buffer AdjEndBuffer {
     uint triEdges[];
 };
 

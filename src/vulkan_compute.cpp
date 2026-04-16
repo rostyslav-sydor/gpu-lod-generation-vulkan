@@ -348,7 +348,8 @@ void App::createDecimationPipelines() {
         "01_hash_vertices", "02_dedup_indices", "03_build_adjacency",
         "04_build_edges", "05_compute_quadrics", "06_compute_edge_cost",
         "07_init_descriptors", "08_select_candidates", "09_collapse_edges",
-        "10_mark_degenerate", "11_compact", "12_copy_back"
+        "10_mark_degenerate", "11_compact", "12_copy_back",
+        "03b_adj_scatter"
     };
 
     for (uint32_t i = 0; i < DECIMATION_PASS_COUNT; i++) {
@@ -393,7 +394,7 @@ void App::allocateDecimationBuffers(uint32_t vertCount, uint32_t triCount) {
     decimationBufSizes[DB_TRI_ADJ_NEXT]   = (VkDeviceSize)triCount * 3 * sizeof(uint32_t);
     decimationBufSizes[DB_EDGE]           = (VkDeviceSize)maxEdges * 2 * sizeof(uint32_t);
     decimationBufSizes[DB_EDGE_TRI]       = (VkDeviceSize)maxEdges * 2 * sizeof(uint32_t);
-    decimationBufSizes[DB_TRI_EDGE]       = (VkDeviceSize)triCount * 3 * sizeof(uint32_t);
+    decimationBufSizes[DB_TRI_EDGE]       = (VkDeviceSize)vertCount * sizeof(uint32_t);
     decimationBufSizes[DB_QUADRIC]        = (VkDeviceSize)vertCount * 11 * sizeof(int32_t);
     decimationBufSizes[DB_EDGE_COST]      = (VkDeviceSize)maxEdges * sizeof(float);
     decimationBufSizes[DB_EDGE_FLAG]      = (VkDeviceSize)maxEdges * sizeof(uint32_t);
