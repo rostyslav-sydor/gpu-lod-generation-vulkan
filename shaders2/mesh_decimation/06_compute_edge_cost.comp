@@ -40,9 +40,6 @@ uint countAdjacent(uint vertIdx) {
     return count;
 }
 
-// Check that moving vertIdx -> newPos doesn't flip any adjacent triangle.
-// Triangles containing otherVert are skipped (they share the collapse edge
-// and will become degenerate, handled by pass 10).
 bool checkFlips(uint vertIdx, vec3 oldPos, uint otherVert, vec3 newPos) {
     uint packed = adjHead[vertIdx];
     uint safety = 0u;
@@ -68,8 +65,7 @@ bool checkFlips(uint vertIdx, vec3 oldPos, uint otherVert, vec3 newPos) {
         vec3 oldN = cross(pa - oldPos,  pb - oldPos);
         vec3 newN = cross(pa - newPos,  pb - newPos);
 
-        // Block if the triangle would flip its normal
-        if (dot(oldN, newN) <= 0.0) return false;
+        if (dot(oldN, newN) <= 0.25 * sqrt(dot(oldN, oldN) * dot(newN, newN))) return false;
 
         packed = triAdjNext[triIdx * 3u + slot];
     }

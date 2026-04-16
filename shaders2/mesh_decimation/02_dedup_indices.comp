@@ -55,11 +55,11 @@ void main() {
             }
 
             if (prev == key) {
+                memoryBarrierBuffer();
                 uint existingIdx = positionHashMap[s].y;
-                while (existingIdx == HASHMAP_EMPTY) {
-                    memoryBarrierBuffer();
-                    existingIdx = positionHashMap[s].y;
-                }
+
+                // Value not yet written by the winner — treat as collision, keep probing
+                if (existingIdx == HASHMAP_EMPTY) continue;
 
                 Vertex existing = loadVertex(existingIdx);
 

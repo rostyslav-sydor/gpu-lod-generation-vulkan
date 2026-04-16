@@ -40,12 +40,11 @@ void main() {
 
         // Slot occupied — check if key matches
         if (prev == key) {
-            // Potential match — wait for value to be written, then verify
+            memoryBarrierBuffer();
             uint canonical = vertexHashMap[s].y;
-            while (canonical == HASHMAP_EMPTY) {
-                memoryBarrierBuffer();
-                canonical = vertexHashMap[s].y;
-            }
+
+            // Value not yet written by the winner — treat as collision, keep probing
+            if (canonical == HASHMAP_EMPTY) continue;
 
             Vertex existing = loadVertex(canonical);
             if (vertices_equal(v, existing)) {

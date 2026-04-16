@@ -147,6 +147,8 @@ void App::cleanup() {
 
     vkDestroySemaphore(device, computeFinishedSemaphore, nullptr);
     vkDestroyFence(device, computeFence, nullptr);
+    if (timestampQueryPool != VK_NULL_HANDLE)
+        vkDestroyQueryPool(device, timestampQueryPool, nullptr);
 
     vkDestroyCommandPool(device, computeCommandPool, nullptr);
     vkDestroyCommandPool(device, commandPool, nullptr);
@@ -1228,6 +1230,17 @@ void App::createSyncObjects() {
         vkCreateSemaphore(device, &semaphoreInfo, nullptr, &computeFinishedSemaphore) != VK_SUCCESS) {
             throw std::runtime_error("failed to create synchronization objects for a frame!");
         }
+
+    VkQueryPoolCreateInfo queryPoolInfo{VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};
+    queryPoolInfo.queryType = VK_QUERY_TYPE_TIMESTAMP;
+    queryPoolInfo.queryCount = 16;
+    if (vkCreateQueryPool(device, &queryPoolInfo, nullptr, &timestampQueryPool) != VK_SUCCESS) {
+        throw std::runtime_error("failed to create timestamp query pool!");
+    }
+
+    VkPhysicalDeviceProperties props;
+    vkGetPhysicalDeviceProperties(physicalDevice, &props);
+    timestampPeriodNs = props.limits.timestampPeriod;
 }
 
 void App::updateUniformBuffer(uint32_t currentImage) {

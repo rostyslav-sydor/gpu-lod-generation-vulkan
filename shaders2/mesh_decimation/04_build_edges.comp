@@ -57,10 +57,8 @@ void insertEdge(uint v0, uint v1, uint triIdx) {
         if (edgeHashMap[s].x == eMin && edgeHashMap[s].y == eMax) {
             uint edgeIdx = edgeHashMap[s].z;
 
-            while (edgeIdx == HASHMAP_EMPTY) {
-                memoryBarrierBuffer();
-                edgeIdx = edgeHashMap[s].z;
-            }
+            // Value not yet written by the winner — treat as collision, keep probing
+            if (edgeIdx == HASHMAP_EMPTY) continue;
 
             // Record second adjacent triangle
             atomicCompSwap(edgeTriangles[edgeIdx * 2u + 1u], NONE, triIdx);

@@ -255,6 +255,9 @@ private:
     VkSemaphore computeFinishedSemaphore;
     VkFence computeFence;
 
+    VkQueryPool timestampQueryPool = VK_NULL_HANDLE;
+    float timestampPeriodNs = 1.0f;
+
     static constexpr uint32_t DECIMATION_PASS_COUNT = 12;
     VkPipeline decimationPipelines[DECIMATION_PASS_COUNT] = {};
     VkPipelineLayout decimationPipelineLayout = VK_NULL_HANDLE;

@@ -756,12 +756,18 @@ void App::runDecimation() {
 
     long long batchATimeUs = 0, batchBTimeUs = 0;
 
+    const char* gpuPassNames[] = {"P3:adj", "P4:edges", "P5:quadrics", "P6:edgecost",
+        "P7:initdesc", "P8:scatter", "P9:collapse", "P10:degen", "P11:compact", "P12:copyback"};
+    double gpuPassTimeMs[10] = {};
+
     for (uint32_t iteration = 0; iteration < maxDecimationIterations; iteration++) {
         Timer iterTimer;
         std::cout << "  iter " << iteration << ": passes 3-4..." << std::flush;
         // --- Phase A: Clears + Pass 3 + Pass 4 (one batch) ---
         {
             VkCommandBuffer cmd = beginCmd();
+
+            vkCmdResetQueryPool(cmd, timestampQueryPool, 0, 16);
 
             vkCmdFillBuffer(cmd, decimationBufs[DB_ADJ_HEAD], 0, decimationBufSizes[DB_ADJ_HEAD], 0xFFFFFFFF);
             vkCmdFillBuffer(cmd, decimationBufs[DB_HASHMAP_EDGE], 0, edgeHashMapSize, 0xFFFFFFFF);
@@ -779,12 +785,21 @@ void App::runDecimation() {
             pc.iteration = iteration;
             pc.costMode = decimationCostMode;
 
+            vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, timestampQueryPool, 0);
             dispatchPass(cmd, 2, pc, divUp(triCount, WORKGROUP_SIZE));
             computeBarrier(cmd);
+            vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, timestampQueryPool, 1);
             dispatchPass(cmd, 3, pc, divUp(triCount, WORKGROUP_SIZE));
             computeBarrier(cmd);
+            vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, timestampQueryPool, 2);
 
             submitAndWait(cmd);
+
+            uint64_t tsA[3];
+            vkGetQueryPoolResults(device, timestampQueryPool, 0, 3, sizeof(tsA), tsA,
+                sizeof(uint64_t), VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT);
+            gpuPassTimeMs[0] += (double)(tsA[1] - tsA[0]) * timestampPeriodNs * 1e-6;
+            gpuPassTimeMs[1] += (double)(tsA[2] - tsA[1]) * timestampPeriodNs * 1e-6;
         }
         batchATimeUs += iterTimer.reset();
         std::cout << " ok, readback..." << std::flush;
@@ -823,13 +838,22 @@ void App::runDecimation() {
                 {11, divUp(triCount, WORKGROUP_SIZE)},   // P12: copyback
             };
 
-            for (auto& p : passes) {
-                dispatchPass(cmd, p.idx, pc, p.count);
+            vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, timestampQueryPool, 3);
+            for (int pi = 0; pi < 8; pi++) {
+                dispatchPass(cmd, passes[pi].idx, pc, passes[pi].count);
                 computeBarrier(cmd);
+                vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, timestampQueryPool, 4 + pi);
             }
 
             submitAndWait(cmd);
             batchBTimeUs += batchBTimer.getTime();
+
+            uint64_t tsB[9];
+            vkGetQueryPoolResults(device, timestampQueryPool, 3, 9, sizeof(tsB), tsB,
+                sizeof(uint64_t), VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT);
+            for (int pi = 0; pi < 8; pi++)
+                gpuPassTimeMs[pi + 2] += (double)(tsB[pi + 1] - tsB[pi]) * timestampPeriodNs * 1e-6;
+
             std::cout << " P5-P12" << std::flush;
         }
 
@@ -858,16 +882,25 @@ void App::runDecimation() {
         }
     }
 
-    // Print batch time breakdown
+    // Print GPU per-pass time breakdown
     {
+        double totalGpuMs = 0;
+        for (int i = 0; i < 10; i++) totalGpuMs += gpuPassTimeMs[i];
+        if (totalGpuMs > 0) {
+            std::cout << "GPU pass times (total " << std::fixed << std::setprecision(0)
+                      << totalGpuMs << "ms):" << std::setprecision(1);
+            for (int i = 0; i < 10; i++) {
+                double pct = 100.0 * gpuPassTimeMs[i] / totalGpuMs;
+                if (pct >= 0.1)
+                    std::cout << "  " << gpuPassNames[i] << " " << pct << "%";
+            }
+            std::cout << std::defaultfloat << std::endl;
+        }
         long long totalTime = batchATimeUs + batchBTimeUs;
         if (totalTime > 0) {
-            std::cout << "Batch times: P3-P4 " << batchATimeUs / 1000 << "ms ("
-                      << std::fixed << std::setprecision(1)
-                      << 100.0 * batchATimeUs / totalTime << "%)  P5-P12 "
-                      << batchBTimeUs / 1000 << "ms ("
-                      << 100.0 * batchBTimeUs / totalTime << "%)"
-                      << std::defaultfloat << std::endl;
+            std::cout << "Wall times: P3-P4 " << batchATimeUs / 1000 << "ms  P5-P12 "
+                      << batchBTimeUs / 1000 << "ms  total " << totalTime / 1000 << "ms"
+                      << std::endl;
         }
     }
 
