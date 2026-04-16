@@ -45,6 +45,15 @@ void App::loadModel() {
         std::array<unsigned, 3> inds = { face.mIndices[0],face.mIndices[1],face.mIndices[2] };
     }
     std::cout << "verts and inds before simplification: " << vertices.size() << ' ' << indices.size() << '\n';
+
+    // Reorder mesh for GPU cache locality (spatially nearby triangles become memory-adjacent)
+    meshopt_optimizeVertexCache(indices.data(), indices.data(), indices.size(), vertices.size());
+    std::vector<uint32_t> remap(vertices.size());
+    size_t uniqueVerts = meshopt_optimizeVertexFetchRemap(remap.data(), indices.data(), indices.size(), vertices.size());
+    meshopt_remapIndexBuffer(indices.data(), indices.data(), indices.size(), remap.data());
+    meshopt_remapVertexBuffer(vertices.data(), vertices.data(), vertices.size(), sizeof(Vertex), remap.data());
+    std::cout << "Mesh reordered for cache locality\n";
+
     timesLoad.push_back(tWhole.getTime());
 
     meshSnapshots[RENDER_ORIGINAL].verts = vertices;
