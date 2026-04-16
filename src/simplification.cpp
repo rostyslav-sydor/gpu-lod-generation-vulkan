@@ -780,7 +780,8 @@ void App::runDecimation() {
 
             vkCmdFillBuffer(cmd, decimationBufs[DB_ADJ_HEAD], 0, decimationBufSizes[DB_ADJ_HEAD], 0xFFFFFFFF);
             vkCmdFillBuffer(cmd, decimationBufs[DB_HASHMAP_EDGE], 0, edgeHashMapSize, 0xFFFFFFFF);
-            vkCmdFillBuffer(cmd, decimationBufs[DB_QUADRIC], 0, decimationBufSizes[DB_QUADRIC], 0);
+            if (iteration == 0)
+                vkCmdFillBuffer(cmd, decimationBufs[DB_QUADRIC], 0, decimationBufSizes[DB_QUADRIC], 0);
             vkCmdFillBuffer(cmd, decimationBufs[DB_COUNTER], 0, decimationBufSizes[DB_COUNTER], 0);
 
             transferToComputeBarrier(cmd);
@@ -849,6 +850,11 @@ void App::runDecimation() {
 
             vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, timestampQueryPool, 3);
             for (int pi = 0; pi < 8; pi++) {
+                if (pi == 0 && iteration > 0) {
+                    // Skip P5 on subsequent iterations — quadrics merged in P9
+                    vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, timestampQueryPool, 4 + pi);
+                    continue;
+                }
                 dispatchPass(cmd, passes[pi].idx, pc, passes[pi].count);
                 computeBarrier(cmd);
                 vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, timestampQueryPool, 4 + pi);
