@@ -34,30 +34,28 @@ uint countAdjacent(uint vertIdx) {
     return triEdges[vertIdx] - adjHead[vertIdx];
 }
 
-bool checkFlips(uint vertIdx, vec3 oldPos, uint otherVert, vec3 newPos) {
-    uint start = adjHead[vertIdx];
-    uint end   = triEdges[vertIdx];
-    for (uint i = start; i < end; i++) {
-        uint packed = triAdjNext[i];
-        uint triIdx = ADJ_TRI(packed);
+// Cheap flip check: only test the 2 triangles directly sharing this edge.
+// Loads 1 opposite vertex per triangle (3 index reads + 1 vertex read).
+bool checkEdgeFlips(uint triIdx, uint v0, uint v1, vec3 p0, vec3 p1, vec3 optPos) {
+    if (triIdx == NONE) return true;
 
-        uint i0 = indices[triIdx * 3u + 0u];
-        uint i1 = indices[triIdx * 3u + 1u];
-        uint i2 = indices[triIdx * 3u + 2u];
+    uint i0 = indices[triIdx * 3u + 0u];
+    uint i1 = indices[triIdx * 3u + 1u];
+    uint i2 = indices[triIdx * 3u + 2u];
 
-        if (i0 == otherVert || i1 == otherVert || i2 == otherVert)
-            continue;
+    vec3 opp;
+    if      (i0 != v0 && i0 != v1) opp = loadVertex(i0).pos;
+    else if (i1 != v0 && i1 != v1) opp = loadVertex(i1).pos;
+    else                            opp = loadVertex(i2).pos;
 
-        vec3 pa, pb;
-        if      (i0 == vertIdx) { pa = loadVertex(i1).pos; pb = loadVertex(i2).pos; }
-        else if (i1 == vertIdx) { pa = loadVertex(i0).pos; pb = loadVertex(i2).pos; }
-        else                    { pa = loadVertex(i0).pos; pb = loadVertex(i1).pos; }
+    vec3 oldN = cross(p1 - p0, opp - p0);
+    vec3 newN = cross(p1 - optPos, opp - optPos);
+    if (dot(oldN, newN) <= 0.0) return false;
 
-        vec3 oldN = cross(pa - oldPos,  pb - oldPos);
-        vec3 newN = cross(pa - newPos,  pb - newPos);
+    oldN = cross(p0 - p1, opp - p1);
+    newN = cross(optPos - p1, opp - p1);
+    if (dot(oldN, newN) <= 0.0) return false;
 
-        if (dot(oldN, newN) <= 0.25 * sqrt(dot(oldN, oldN) * dot(newN, newN))) return false;
-    }
     return true;
 }
 
@@ -106,7 +104,9 @@ void main() {
     uint flags1 = vertexFlags[v1];
 
     uint eFlags = 0u;
-    bool isBoundary = (edgeTriangles[gid * 2u + 1u] == NONE);
+    uint eTri0 = edgeTriangles[gid * 2u + 0u];
+    uint eTri1 = edgeTriangles[gid * 2u + 1u];
+    bool isBoundary = (eTri1 == NONE);
     if (isBoundary) eFlags |= EDGE_BOUNDARY;
 
     uint valence0 = countAdjacent(v0);
@@ -149,11 +149,9 @@ void main() {
         // Dihedral angle: angle between normals of the two triangles sharing this edge.
         // For boundary edges (one triangle), curvature contribution is maximal.
         float dihedralCost = 1.0;
-        uint tri0 = edgeTriangles[gid * 2u + 0u];
-        uint tri1 = edgeTriangles[gid * 2u + 1u];
-        if (tri0 != NONE && tri1 != NONE) {
-            vec3 n0 = getTriNormal(tri0);
-            vec3 n1 = getTriNormal(tri1);
+        if (eTri0 != NONE && eTri1 != NONE) {
+            vec3 n0 = getTriNormal(eTri0);
+            vec3 n1 = getTriNormal(eTri1);
             float len0 = length(n0);
             float len1 = length(n1);
             if (len0 > 1e-12 && len1 > 1e-12) {
@@ -195,29 +193,30 @@ void main() {
         }
     }
 
-    // --- Flip check (all modes) ---
-    if (!checkFlips(v0, vert0.pos, v1, optPos) ||
-        !checkFlips(v1, vert1.pos, v0, optPos)) {
+    // --- Early exit: skip flip check for edges that are too costly ---
+    if (cost >= costThreshold) {
+        edgeCost[gid] = cost;
+        edgeFlags[gid] = eFlags;
+        return;
+    }
+
+    // --- Cheap flip check: only the 2 triangles sharing this edge ---
+    if (!checkEdgeFlips(eTri0, v0, v1, vert0.pos, vert1.pos, optPos) ||
+        !checkEdgeFlips(eTri1, v0, v1, vert0.pos, vert1.pos, optPos)) {
         edgeCost[gid] = 1e30;
         edgeFlags[gid] = eFlags;
         return;
     }
 
     edgeCost[gid] = cost;
+    eFlags |= EDGE_ELIGIBLE;
 
-    // --- Eligibility (all modes) ---
-    bool eligible = cost < costThreshold;
-    if (eligible) {
-        eFlags |= EDGE_ELIGIBLE;
+    float t = (edgeLen > 1e-10) ? clamp(length(optPos - vert0.pos) / edgeLen, 0.0, 1.0) : 0.5;
+    vec3 optNormal = normalize(mix(vert0.normal, vert1.normal, t));
+    vec2 optTexCoord = mix(vert0.texCoord, vert1.texCoord, t);
 
-        float t = (edgeLen > 1e-10) ? clamp(length(optPos - vert0.pos) / edgeLen, 0.0, 1.0) : 0.5;
-        vec3 optNormal = normalize(mix(vert0.normal, vert1.normal, t));
-        vec2 optTexCoord = mix(vert0.texCoord, vert1.texCoord, t);
-
-        edgeTarget[gid * 3u + 0u] = vec4(optPos, 0.0);
-        edgeTarget[gid * 3u + 1u] = vec4(optNormal, 0.0);
-        edgeTarget[gid * 3u + 2u] = vec4(optTexCoord, 0.0, 0.0);
-    }
-
+    edgeTarget[gid * 3u + 0u] = vec4(optPos, 0.0);
+    edgeTarget[gid * 3u + 1u] = vec4(optNormal, 0.0);
+    edgeTarget[gid * 3u + 2u] = vec4(optTexCoord, 0.0, 0.0);
     edgeFlags[gid] = eFlags;
 }
