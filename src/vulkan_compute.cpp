@@ -348,8 +348,7 @@ void App::createDecimationPipelines() {
         "01_hash_vertices", "02_dedup_indices", "03_build_adjacency",
         "04_build_edges", "05_compute_quadrics", "06_compute_edge_cost",
         "07_init_descriptors", "08_select_candidates", "09_collapse_edges",
-        "10_mark_degenerate", "11_compact", "12_copy_back",
-        "03b_adj_scatter"
+        "10_mark_degenerate", "11_compact", "12_copy_back"
     };
 
     for (uint32_t i = 0; i < DECIMATION_PASS_COUNT; i++) {

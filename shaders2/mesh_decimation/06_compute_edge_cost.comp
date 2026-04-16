@@ -31,31 +31,33 @@
 layout(local_size_x = WORKGROUP_SIZE) in;
 
 uint countAdjacent(uint vertIdx) {
-    return triEdges[vertIdx] - adjHead[vertIdx];
+    uint count = 0u;
+    uint idx = adjHead[vertIdx];
+    while (idx != NONE) { count++; idx = triAdjNext[idx]; }
+    return count;
 }
 
 bool checkFlips(uint vertIdx, vec3 oldPos, uint otherVert, vec3 newPos) {
-    uint start = adjHead[vertIdx];
-    uint end   = triEdges[vertIdx];
-    for (uint i = start; i < end; i++) {
-        uint triIdx = ADJ_TRI(triAdjNext[i]);
+    uint idx = adjHead[vertIdx];
+    while (idx != NONE) {
+        uint triIdx = idx / 3u;
 
         uint i0 = indices[triIdx * 3u + 0u];
         uint i1 = indices[triIdx * 3u + 1u];
         uint i2 = indices[triIdx * 3u + 2u];
 
-        if (i0 == otherVert || i1 == otherVert || i2 == otherVert)
-            continue;
+        if (i0 != otherVert && i1 != otherVert && i2 != otherVert) {
+            vec3 pa, pb;
+            if      (i0 == vertIdx) { pa = loadVertex(i1).pos; pb = loadVertex(i2).pos; }
+            else if (i1 == vertIdx) { pa = loadVertex(i0).pos; pb = loadVertex(i2).pos; }
+            else                    { pa = loadVertex(i0).pos; pb = loadVertex(i1).pos; }
 
-        vec3 pa, pb;
-        if      (i0 == vertIdx) { pa = loadVertex(i1).pos; pb = loadVertex(i2).pos; }
-        else if (i1 == vertIdx) { pa = loadVertex(i0).pos; pb = loadVertex(i2).pos; }
-        else                    { pa = loadVertex(i0).pos; pb = loadVertex(i1).pos; }
+            vec3 oldN = cross(pa - oldPos,  pb - oldPos);
+            vec3 newN = cross(pa - newPos,  pb - newPos);
 
-        vec3 oldN = cross(pa - oldPos,  pb - oldPos);
-        vec3 newN = cross(pa - newPos,  pb - newPos);
-
-        if (dot(oldN, newN) <= 0.25 * sqrt(dot(oldN, oldN) * dot(newN, newN))) return false;
+            if (dot(oldN, newN) <= 0.25 * sqrt(dot(oldN, oldN) * dot(newN, newN))) return false;
+        }
+        idx = triAdjNext[idx];
     }
     return true;
 }

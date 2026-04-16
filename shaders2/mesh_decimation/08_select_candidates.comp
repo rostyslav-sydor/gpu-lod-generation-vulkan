@@ -33,11 +33,11 @@
 layout(local_size_x = WORKGROUP_SIZE) in;
 
 void updateVertex(uint vertIdx, uint64_t descriptor) {
-    uint start = adjHead[vertIdx];
-    uint end   = triEdges[vertIdx];
-    for (uint i = start; i < end; i++) {
-        uint triIdx = ADJ_TRI(triAdjNext[i]);
+    uint idx = adjHead[vertIdx];
+    while (idx != NONE) {
+        uint triIdx = idx / 3u;
         atomicMin(triDescriptor[triIdx], descriptor);
+        idx = triAdjNext[idx];
     }
 }
 

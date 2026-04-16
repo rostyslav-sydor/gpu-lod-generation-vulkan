@@ -2,23 +2,24 @@
 #extension GL_EXT_shader_atomic_int64 : require
 
 // ============================================================================
-// Pass 3: Count Per-Vertex Triangle Adjacency (CSR build, phase 1)
+// Pass 3: Build Per-Vertex Adjacency Lists (linked list)
 //
 // Dispatch: ceil(triangleCount / WORKGROUP_SIZE) workgroups
 // 1 thread per triangle.
 //
-// For each triangle in PB, atomically increments the adjacency count
-// for each of its 3 vertices.
+// For each triangle in PB, prepends each vertex-triangle pair to the
+// per-vertex linked list using atomicExchange on adjHead[v].
 //
 // Prerequisites:
-//   - adjHead[] must be cleared to 0 before dispatch.
+//   - adjHead[] must be cleared to NONE (0xFFFFFFFF) before dispatch.
 //   - posIndices[] (PB) must be populated from Pass 2.
 //
 // Result:
-//   adjHead[v] = number of triangles adjacent to vertex v
+//   adjHead[v] = head index of linked list for vertex v
+//   triAdjNext[triIdx*3+k] = next index in list (previous head)
 //
-// After this pass, the host computes an exclusive prefix sum on adjHead[]
-// to produce CSR offsets, then dispatches the scatter pass (03b).
+// Traversal: idx = adjHead[v]; while (idx != NONE) { triIdx = idx/3;
+//            slot = idx%3; ...; idx = triAdjNext[idx]; }
 // ============================================================================
 
 #include "common.glsl"
@@ -34,6 +35,8 @@ void main() {
 
     for (uint k = 0u; k < 3u; k++) {
         uint vertIdx = posIndices[baseIdx + k];
-        atomicAdd(adjHead[vertIdx], 1u);
+        uint entry = baseIdx + k;
+        uint oldHead = atomicExchange(adjHead[vertIdx], entry);
+        triAdjNext[entry] = oldHead;
     }
 }
