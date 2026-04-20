@@ -801,13 +801,18 @@ void App::runDecimation() {
     std::cout << " done" << std::endl;
 
     // ======================================================================
-    // Phase 2: Iterative decimation loop (passes 3-12)
+    // Phase 2: Iterative decimation loop
     // ======================================================================
+    // Pipeline indices (10 total):
+    //   0: hash_vertices   1: dedup_indices   2: build_adjacency  3: build_edges
+    //   4: compute_quadrics (+ init descriptors)   5: compute_cost_and_scatter (fused P6+P7+P8)
+    //   6: collapse_edges   7: mark_degenerate   8: compact   9: copy_back
+
     VkDeviceSize edgeHashMapSize = decimationBufSizes[DB_HASHMAP_EDGE];
 
-    const char* gpuPassNames[] = {"P3:adj", "P4:edges", "P5:quadrics", "P6:edgecost",
-        "P7-9:select+collapse", "(unused)", "(unused)", "P10:degen", "P11:compact", "P12:copyback"};
-    double gpuPassTimeMs[10] = {};
+    const char* gpuPassNames[] = {"P3:adj", "P4:edges", "P5:quadrics+initdesc",
+        "P6:cost+scatter", "P9:collapse", "P10:degen", "P11:compact", "P12:copyback"};
+    double gpuPassTimeMs[8] = {};
 
     uint32_t dispatchEdges = maxEdges;
 
@@ -826,8 +831,6 @@ void App::runDecimation() {
         pc.costQuantBits = decimationCostQuantBits;
 
         uint32_t edgeDispatchWGs = divUp(dispatchEdges, WORKGROUP_SIZE);
-
-        uint32_t K = decimationInnerRounds;
 
         VkCommandBuffer cmd = beginCmd();
         vkCmdResetQueryPool(cmd, timestampQueryPool, 0, 16);
@@ -849,44 +852,38 @@ void App::runDecimation() {
         dispatchPass(cmd, 3, pc, divUp(triCount, WORKGROUP_SIZE));
         computeBarrier(cmd);
 
-        // P5: quadrics
+        // P5: quadrics + init triDescriptor (fused P7)
         vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, timestampQueryPool, 2);
         dispatchPass(cmd, 4, pc, divUp(triCount, WORKGROUP_SIZE));
         computeBarrier(cmd);
 
-        // P6: edge cost (dispatch over known edge bound, shader reads actual edgeCount from counter)
+        // P6 (fused): compute edge cost + scatter to tri descriptors
         vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, timestampQueryPool, 3);
         dispatchPass(cmd, 5, pc, edgeDispatchWGs);
         computeBarrier(cmd);
-        vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, timestampQueryPool, 4);
 
-        // Inner rounds: P7 -> P8 -> P9 repeated K times
-        for (uint32_t round = 0; round < K; round++) {
-            dispatchPass(cmd, 6, pc, divUp(triCount, WORKGROUP_SIZE));   // P7: init descriptors
-            computeBarrier(cmd);
-            dispatchPass(cmd, 7, pc, edgeDispatchWGs);                   // P8: scatter
-            computeBarrier(cmd);
-            dispatchPass(cmd, 8, pc, edgeDispatchWGs);                   // P9: collapse
-            computeBarrier(cmd);
-        }
-        vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, timestampQueryPool, 5);
+        // P9: collapse edges
+        vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, timestampQueryPool, 4);
+        dispatchPass(cmd, 6, pc, edgeDispatchWGs);
+        computeBarrier(cmd);
 
         // P10: mark degenerate
-        dispatchPass(cmd, 9, pc, divUp(triCount, WORKGROUP_SIZE));
+        vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, timestampQueryPool, 5);
+        dispatchPass(cmd, 7, pc, divUp(triCount, WORKGROUP_SIZE));
         computeBarrier(cmd);
-        vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, timestampQueryPool, 6);
 
         // P11: compact
-        dispatchPass(cmd, 10, pc, divUp(triCount, WORKGROUP_SIZE));
+        vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, timestampQueryPool, 6);
+        dispatchPass(cmd, 8, pc, divUp(triCount, WORKGROUP_SIZE));
         computeBarrier(cmd);
-        vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, timestampQueryPool, 7);
 
         // P12: copyback
-        dispatchPass(cmd, 11, pc, divUp(triCount, WORKGROUP_SIZE));
+        vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, timestampQueryPool, 7);
+        dispatchPass(cmd, 9, pc, divUp(triCount, WORKGROUP_SIZE));
         computeBarrier(cmd);
         vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, timestampQueryPool, 8);
 
-        // Copy counters to host-visible readback buffer (only needed for device-local path)
+        // Copy counters to host-visible readback buffer
         if (decimationUseDeviceLocal) {
             VkBufferCopy region{};
             region.size = 256;
@@ -907,12 +904,12 @@ void App::runDecimation() {
                 sizeof(uint64_t), VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT);
             gpuPassTimeMs[0] += (double)(ts[1] - ts[0]) * timestampPeriodNs * 1e-6; // P3
             gpuPassTimeMs[1] += (double)(ts[2] - ts[1]) * timestampPeriodNs * 1e-6; // P4
-            gpuPassTimeMs[2] += (double)(ts[3] - ts[2]) * timestampPeriodNs * 1e-6; // P5
-            gpuPassTimeMs[3] += (double)(ts[4] - ts[3]) * timestampPeriodNs * 1e-6; // P6
-            gpuPassTimeMs[4] += (double)(ts[5] - ts[4]) * timestampPeriodNs * 1e-6; // P7+P8+P9
-            gpuPassTimeMs[7] += (double)(ts[6] - ts[5]) * timestampPeriodNs * 1e-6; // P10
-            gpuPassTimeMs[8] += (double)(ts[7] - ts[6]) * timestampPeriodNs * 1e-6; // P11
-            gpuPassTimeMs[9] += (double)(ts[8] - ts[7]) * timestampPeriodNs * 1e-6; // P12
+            gpuPassTimeMs[2] += (double)(ts[3] - ts[2]) * timestampPeriodNs * 1e-6; // P5+initdesc
+            gpuPassTimeMs[3] += (double)(ts[4] - ts[3]) * timestampPeriodNs * 1e-6; // P6 fused
+            gpuPassTimeMs[4] += (double)(ts[5] - ts[4]) * timestampPeriodNs * 1e-6; // P9 collapse
+            gpuPassTimeMs[5] += (double)(ts[6] - ts[5]) * timestampPeriodNs * 1e-6; // P10
+            gpuPassTimeMs[6] += (double)(ts[7] - ts[6]) * timestampPeriodNs * 1e-6; // P11
+            gpuPassTimeMs[7] += (double)(ts[8] - ts[7]) * timestampPeriodNs * 1e-6; // P12
         }
 
         uint32_t edgeCount     = readCounter(0);
@@ -950,11 +947,11 @@ void App::runDecimation() {
     // Print GPU per-pass time breakdown
     {
         double totalGpuMs = 0;
-        for (int i = 0; i < 10; i++) totalGpuMs += gpuPassTimeMs[i];
+        for (int i = 0; i < 8; i++) totalGpuMs += gpuPassTimeMs[i];
         if (totalGpuMs > 0) {
             std::cout << "GPU pass times (total " << std::fixed << std::setprecision(0)
                       << totalGpuMs << "ms):" << std::setprecision(1);
-            for (int i = 0; i < 10; i++) {
+            for (int i = 0; i < 8; i++) {
                 double pct = 100.0 * gpuPassTimeMs[i] / totalGpuMs;
                 if (pct >= 0.1)
                     std::cout << "  " << gpuPassNames[i] << " " << pct << "%";
