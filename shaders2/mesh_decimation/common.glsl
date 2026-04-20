@@ -240,6 +240,16 @@ Quadric quadric_from_triangle_edge(vec3 p0, vec3 p1, vec3 p2, float weight) {
 // ============================================================================
 
 // ============================================================================
+// Cost quantization for parallel collapse
+// ============================================================================
+
+uint quantizeCostBits(float cost, uint mantissaBits) {
+    uint bits = floatBitsToUint(cost);
+    uint shift = 23u - min(mantissaBits, 23u);
+    return (bits >> shift) << shift;
+}
+
+// ============================================================================
 // Utility
 // ============================================================================
 

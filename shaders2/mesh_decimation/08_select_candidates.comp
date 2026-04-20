@@ -43,16 +43,19 @@ void updateVertex(uint vertIdx, uint64_t descriptor) {
 
 void main() {
     uint gid = gl_GlobalInvocationID.x;
-    if (gid >= edgeCount) return;
+    uint actualEdgeCount = counters[COUNTER_EDGE_COUNT];
+    if (gid >= actualEdgeCount) return;
 
     if ((edgeFlags[gid] & EDGE_ELIGIBLE) == 0u) return;
 
+    uvec2 edge = edges[gid];
+    if (((vertexFlags[edge.x] | vertexFlags[edge.y]) & FLAG_COLLAPSED) != 0u) return;
+
     float cost = edgeCost[gid];
 
-    uint costBits = floatBitsToUint(cost);
+    uint costBits = quantizeCostBits(cost, costQuantBits);
     uint64_t descriptor = (uint64_t(costBits) << 32) | uint64_t(gid);
 
-    uvec2 edge = edges[gid];
     updateVertex(edge.x, descriptor);
     updateVertex(edge.y, descriptor);
 }

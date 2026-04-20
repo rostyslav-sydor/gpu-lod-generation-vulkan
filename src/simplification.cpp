@@ -613,7 +613,8 @@ void App::runDecimation() {
 
     const char* modeNames[] = {"QEM", "Paper (curvature+length+valence)", "Meshopt-like (QEM+borders+reg)"};
     std::cout << "Decimation: " << vertCount << " vertices, " << triCount << " triangles, hashMap=" << hashMapSize
-              << ", costMode=" << decimationCostMode << " (" << modeNames[std::min(decimationCostMode, 2u)] << ")" << std::endl;
+              << ", costMode=" << decimationCostMode << " (" << modeNames[std::min(decimationCostMode, 2u)] << ")"
+              << ", rounds=" << decimationInnerRounds << std::endl;
 
     // --- Allocate buffers and descriptors ---
     std::cout << "  allocating buffers..." << std::flush;
@@ -745,6 +746,7 @@ void App::runDecimation() {
         pc.costThreshold = decimationCostThreshold;
         pc.iteration = 0;
         pc.costMode = decimationCostMode;
+        pc.costQuantBits = decimationCostQuantBits;
 
         // Pass 1: Hash Vertices
         dispatchPass(cmd, 0, pc, divUp(vertCount, WORKGROUP_SIZE));
@@ -763,124 +765,124 @@ void App::runDecimation() {
     // ======================================================================
     VkDeviceSize edgeHashMapSize = decimationBufSizes[DB_HASHMAP_EDGE];
 
-    long long batchATimeUs = 0, batchBTimeUs = 0;
-
     const char* gpuPassNames[] = {"P3:adj", "P4:edges", "P5:quadrics", "P6:edgecost",
-        "P7:initdesc", "P8:scatter", "P9:collapse", "P10:degen", "P11:compact", "P12:copyback"};
+        "P7-9:select+collapse", "(unused)", "(unused)", "P10:degen", "P11:compact", "P12:copyback"};
     double gpuPassTimeMs[10] = {};
 
     for (uint32_t iteration = 0; iteration < maxDecimationIterations; iteration++) {
         Timer iterTimer;
-        std::cout << "  iter " << iteration << ": passes 3-4..." << std::flush;
-        // --- Phase A: Build adjacency (linked list) + edge build ---
-        {
-            VkCommandBuffer cmd = beginCmd();
 
-            vkCmdResetQueryPool(cmd, timestampQueryPool, 0, 16);
+        DecimationPushConstants pc{};
+        pc.vertexCount = vertCount;
+        pc.triangleCount = triCount;
+        pc.edgeCount = maxEdges;
+        pc.hashMapSize = hashMapSize;
+        float adaptiveCost = decimationCostThreshold * std::pow(decimationGrowthRate, (float)iteration);
+        pc.costThreshold = adaptiveCost;
+        pc.iteration = iteration;
+        pc.costMode = decimationCostMode;
+        pc.costQuantBits = decimationCostQuantBits;
 
-            vkCmdFillBuffer(cmd, decimationBufs[DB_ADJ_HEAD], 0, decimationBufSizes[DB_ADJ_HEAD], 0xFFFFFFFF);
-            vkCmdFillBuffer(cmd, decimationBufs[DB_HASHMAP_EDGE], 0, edgeHashMapSize, 0xFFFFFFFF);
-            vkCmdFillBuffer(cmd, decimationBufs[DB_QUADRIC], 0, decimationBufSizes[DB_QUADRIC], 0);
-            vkCmdFillBuffer(cmd, decimationBufs[DB_COUNTER], 0, decimationBufSizes[DB_COUNTER], 0);
+        uint32_t K = decimationInnerRounds;
 
-            transferToComputeBarrier(cmd);
+        VkCommandBuffer cmd = beginCmd();
+        vkCmdResetQueryPool(cmd, timestampQueryPool, 0, 16);
 
-            DecimationPushConstants pc{};
-            pc.vertexCount = vertCount;
-            pc.triangleCount = triCount;
-            pc.edgeCount = 0;
-            pc.hashMapSize = hashMapSize;
-            pc.costThreshold = decimationCostThreshold;
-            pc.iteration = iteration;
-            pc.costMode = decimationCostMode;
+        // Clear buffers
+        vkCmdFillBuffer(cmd, decimationBufs[DB_ADJ_HEAD], 0, decimationBufSizes[DB_ADJ_HEAD], 0xFFFFFFFF);
+        vkCmdFillBuffer(cmd, decimationBufs[DB_HASHMAP_EDGE], 0, edgeHashMapSize, 0xFFFFFFFF);
+        vkCmdFillBuffer(cmd, decimationBufs[DB_QUADRIC], 0, decimationBufSizes[DB_QUADRIC], 0);
+        vkCmdFillBuffer(cmd, decimationBufs[DB_COUNTER], 0, decimationBufSizes[DB_COUNTER], 0);
+        transferToComputeBarrier(cmd);
 
-            vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, timestampQueryPool, 0);
-            dispatchPass(cmd, 2, pc, divUp(triCount, WORKGROUP_SIZE));  // P3: build adjacency
+        // P3: build adjacency
+        vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, timestampQueryPool, 0);
+        dispatchPass(cmd, 2, pc, divUp(triCount, WORKGROUP_SIZE));
+        computeBarrier(cmd);
+
+        // P4: build edges
+        vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, timestampQueryPool, 1);
+        dispatchPass(cmd, 3, pc, divUp(triCount, WORKGROUP_SIZE));
+        computeBarrier(cmd);
+
+        // P5: quadrics
+        vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, timestampQueryPool, 2);
+        dispatchPass(cmd, 4, pc, divUp(triCount, WORKGROUP_SIZE));
+        computeBarrier(cmd);
+
+        // P6: edge cost (over-dispatch, shader reads actual edgeCount from counter)
+        vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, timestampQueryPool, 3);
+        dispatchPass(cmd, 5, pc, divUp(maxEdges, WORKGROUP_SIZE));
+        computeBarrier(cmd);
+        vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, timestampQueryPool, 4);
+
+        // Inner rounds: P7 -> P8 -> P9 repeated K times
+        for (uint32_t round = 0; round < K; round++) {
+            dispatchPass(cmd, 6, pc, divUp(triCount, WORKGROUP_SIZE));   // P7: init descriptors
             computeBarrier(cmd);
-            vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, timestampQueryPool, 1);
-            dispatchPass(cmd, 3, pc, divUp(triCount, WORKGROUP_SIZE));  // P4: build edges
+            dispatchPass(cmd, 7, pc, divUp(maxEdges, WORKGROUP_SIZE));   // P8: scatter (over-dispatch)
             computeBarrier(cmd);
-            vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, timestampQueryPool, 2);
-
-            submitAndWait(cmd);
-
-            uint64_t tsA[3];
-            vkGetQueryPoolResults(device, timestampQueryPool, 0, 3, sizeof(tsA), tsA,
-                sizeof(uint64_t), VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT);
-            gpuPassTimeMs[0] += (double)(tsA[1] - tsA[0]) * timestampPeriodNs * 1e-6;
-            gpuPassTimeMs[1] += (double)(tsA[2] - tsA[1]) * timestampPeriodNs * 1e-6;
+            dispatchPass(cmd, 8, pc, divUp(maxEdges, WORKGROUP_SIZE));   // P9: collapse (over-dispatch)
+            computeBarrier(cmd);
         }
-        batchATimeUs += iterTimer.reset();
-        std::cout << " ok, readback..." << std::flush;
+        vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, timestampQueryPool, 5);
 
-        // Read back edge count
-        uint32_t edgeCount = readCounter(0);
-        std::cout << " edges=" << edgeCount << std::flush;
-        if (edgeCount == 0) { std::cout << " (done)\n"; break; }
+        // P10: mark degenerate
+        dispatchPass(cmd, 9, pc, divUp(triCount, WORKGROUP_SIZE));
+        computeBarrier(cmd);
+        vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, timestampQueryPool, 6);
 
+        // P11: compact
+        dispatchPass(cmd, 10, pc, divUp(triCount, WORKGROUP_SIZE));
+        computeBarrier(cmd);
+        vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, timestampQueryPool, 7);
+
+        // P12: copyback
+        dispatchPass(cmd, 11, pc, divUp(triCount, WORKGROUP_SIZE));
+        computeBarrier(cmd);
+        vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, timestampQueryPool, 8);
+
+        submitAndWait(cmd);
+
+        // Collect timestamps
         {
-            DecimationPushConstants pc{};
-            pc.vertexCount = vertCount;
-            pc.triangleCount = triCount;
-            pc.edgeCount = edgeCount;
-            pc.hashMapSize = hashMapSize;
-            float adaptiveCost = decimationCostThreshold * std::pow(decimationGrowthRate, (float)iteration);
-            pc.costThreshold = adaptiveCost;
-            pc.iteration = iteration;
-            pc.costMode = decimationCostMode;
-
-            // --- Phase B: Passes 5-12 (one batch) ---
-            Timer batchBTimer;
-            VkCommandBuffer cmd = beginCmd();
-
-            struct { int idx; uint32_t count; } passes[] = {
-                {4,  divUp(triCount, WORKGROUP_SIZE)},   // P5: quadrics
-                {5,  divUp(edgeCount, WORKGROUP_SIZE)},  // P6: edgecost
-                {6,  divUp(triCount, WORKGROUP_SIZE)},   // P7: initdesc
-                {7,  divUp(edgeCount, WORKGROUP_SIZE)},  // P8: scatter
-                {8,  divUp(edgeCount, WORKGROUP_SIZE)},  // P9: collapse
-                {9,  divUp(triCount, WORKGROUP_SIZE)},   // P10: degen
-                {10, divUp(triCount, WORKGROUP_SIZE)},   // P11: compact
-                {11, divUp(triCount, WORKGROUP_SIZE)},   // P12: copyback
-            };
-
-            vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, timestampQueryPool, 3);
-            for (int pi = 0; pi < 8; pi++) {
-                dispatchPass(cmd, passes[pi].idx, pc, passes[pi].count);
-                computeBarrier(cmd);
-                vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, timestampQueryPool, 4 + pi);
-            }
-
-            submitAndWait(cmd);
-            batchBTimeUs += batchBTimer.getTime();
-
-            uint64_t tsB[9];
-            vkGetQueryPoolResults(device, timestampQueryPool, 3, 9, sizeof(tsB), tsB,
+            uint64_t ts[9];
+            vkGetQueryPoolResults(device, timestampQueryPool, 0, 9, sizeof(ts), ts,
                 sizeof(uint64_t), VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT);
-            for (int pi = 0; pi < 8; pi++)
-                gpuPassTimeMs[pi + 2] += (double)(tsB[pi + 1] - tsB[pi]) * timestampPeriodNs * 1e-6;
-
-            std::cout << " P5-P12" << std::flush;
+            gpuPassTimeMs[0] += (double)(ts[1] - ts[0]) * timestampPeriodNs * 1e-6; // P3
+            gpuPassTimeMs[1] += (double)(ts[2] - ts[1]) * timestampPeriodNs * 1e-6; // P4
+            gpuPassTimeMs[2] += (double)(ts[3] - ts[2]) * timestampPeriodNs * 1e-6; // P5
+            gpuPassTimeMs[3] += (double)(ts[4] - ts[3]) * timestampPeriodNs * 1e-6; // P6
+            gpuPassTimeMs[4] += (double)(ts[5] - ts[4]) * timestampPeriodNs * 1e-6; // P7+P8+P9
+            gpuPassTimeMs[7] += (double)(ts[6] - ts[5]) * timestampPeriodNs * 1e-6; // P10
+            gpuPassTimeMs[8] += (double)(ts[7] - ts[6]) * timestampPeriodNs * 1e-6; // P11
+            gpuPassTimeMs[9] += (double)(ts[8] - ts[7]) * timestampPeriodNs * 1e-6; // P12
         }
 
+        uint32_t edgeCount     = readCounter(0);
         uint32_t collapseCount = readCounter(1);
         uint32_t newTriCount   = readCounter(4);
         long long iterUs = iterTimer.getTime();
         uint32_t trisRemoved = triCount - newTriCount;
         double trisPerSec = (iterUs > 0) ? (double)trisRemoved / ((double)iterUs * 1e-6) : 0.0;
 
-        std::cout << " collapsed=" << collapseCount
-                  << " tris=" << newTriCount << " (was " << triCount << ")"
-                  << " " << iterUs / 1000 << "ms";
-        if (trisRemoved > 0) {
-            if (trisPerSec >= 1e6)
-                std::cout << " " << std::fixed << std::setprecision(1) << trisPerSec / 1e6 << "M tri/s";
-            else
-                std::cout << " " << std::fixed << std::setprecision(1) << trisPerSec / 1e3 << "K tri/s";
+        if (iteration < 5 || iteration % 10 == 0 || collapseCount == 0
+            || newTriCount <= static_cast<uint32_t>(originalTriCount * decimationTargetRatio)) {
+            std::cout << "  iter " << iteration
+                      << ": edges=" << edgeCount
+                      << " collapsed=" << collapseCount
+                      << " tris=" << newTriCount << " (was " << triCount << ")"
+                      << " " << iterUs / 1000 << "ms";
+            if (trisRemoved > 0) {
+                if (trisPerSec >= 1e6)
+                    std::cout << " " << std::fixed << std::setprecision(1) << trisPerSec / 1e6 << "M tri/s";
+                else
+                    std::cout << " " << std::fixed << std::setprecision(1) << trisPerSec / 1e3 << "K tri/s";
+            }
+            std::cout << std::defaultfloat << std::endl;
         }
-        std::cout << std::defaultfloat << std::endl;
 
-        if (collapseCount == 0) break;
+        if (edgeCount == 0 || collapseCount == 0) break;
         triCount = newTriCount;
         if (triCount <= static_cast<uint32_t>(originalTriCount * decimationTargetRatio)) {
             std::cout << "  target ratio reached\n";
@@ -901,12 +903,6 @@ void App::runDecimation() {
                     std::cout << "  " << gpuPassNames[i] << " " << pct << "%";
             }
             std::cout << std::defaultfloat << std::endl;
-        }
-        long long totalTime = batchATimeUs + batchBTimeUs;
-        if (totalTime > 0) {
-            std::cout << "Wall times: P3-P4 " << batchATimeUs / 1000 << "ms  P5-P12 "
-                      << batchBTimeUs / 1000 << "ms  total " << totalTime / 1000 << "ms"
-                      << std::endl;
         }
     }
 

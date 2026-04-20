@@ -97,7 +97,8 @@ vec3 getTriNormal(uint triIdx) {
 
 void main() {
     uint gid = gl_GlobalInvocationID.x;
-    if (gid >= edgeCount) return;
+    uint actualEdgeCount = counters[COUNTER_EDGE_COUNT];
+    if (gid >= actualEdgeCount) return;
 
     uvec2 edge = edges[gid];
     uint v0 = edge.x;

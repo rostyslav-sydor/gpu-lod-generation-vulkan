@@ -133,6 +133,7 @@ layout(push_constant) uniform PushConstants {
     float costThreshold;
     uint iteration;
     uint costMode;
+    uint costQuantBits;
 };
 
 // ============================================================================

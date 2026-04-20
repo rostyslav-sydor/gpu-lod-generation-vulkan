@@ -60,7 +60,8 @@ void replaceInAdjacent(uint oldVert, uint newVert) {
 
 void main() {
     uint gid = gl_GlobalInvocationID.x;
-    if (gid >= edgeCount) return;
+    uint actualEdgeCount = counters[COUNTER_EDGE_COUNT];
+    if (gid >= actualEdgeCount) return;
 
     if ((edgeFlags[gid] & EDGE_ELIGIBLE) == 0u) return;
 
@@ -68,8 +69,10 @@ void main() {
     uint v0 = edge.x;
     uint v1 = edge.y;
 
+    if (((vertexFlags[v0] | vertexFlags[v1]) & FLAG_COLLAPSED) != 0u) return;
+
     float cost = edgeCost[gid];
-    uint costBits = floatBitsToUint(cost);
+    uint costBits = quantizeCostBits(cost, costQuantBits);
     uint64_t descriptor = (uint64_t(costBits) << 32) | uint64_t(gid);
 
     // Check if we won the race for ALL adjacent triangles of BOTH vertices
