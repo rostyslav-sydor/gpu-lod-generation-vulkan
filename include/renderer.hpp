@@ -273,6 +273,15 @@ private:
     VkDeviceMemory decimationMem[DB_COUNT] = {};
     VkDeviceSize decimationBufSizes[DB_COUNT] = {};
 
+    bool decimationUseDeviceLocal = true;
+
+    VkBuffer counterReadbackBuf = VK_NULL_HANDLE;
+    VkDeviceMemory counterReadbackMem = VK_NULL_HANDLE;
+    void* counterReadbackMapped = nullptr;
+
+    VkBuffer stagingReadbackBuf = VK_NULL_HANDLE;
+    VkDeviceMemory stagingReadbackMem = VK_NULL_HANDLE;
+
     bool framebufferResized = false;
 
     MeshSnapshot meshSnapshots[RENDER_MODE_COUNT];

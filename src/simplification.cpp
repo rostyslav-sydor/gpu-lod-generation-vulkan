@@ -624,34 +624,70 @@ void App::runDecimation() {
     std::cout << " done" << std::endl;
 
     // --- Upload vertex data (interleaved vec4 pairs) ---
+    std::cout << "  uploading data..." << std::flush;
     {
-        void* data;
-        vkMapMemory(device, decimationMem[DB_VERTEX], 0, decimationBufSizes[DB_VERTEX], 0, &data);
-        float* dst = static_cast<float*>(data);
-        for (uint32_t i = 0; i < vertCount; i++) {
-            dst[i * 12 + 0]  = vertices[i].pos.x;
-            dst[i * 12 + 1]  = vertices[i].pos.y;
-            dst[i * 12 + 2]  = vertices[i].pos.z;
-            dst[i * 12 + 3]  = 0.0f;
-            dst[i * 12 + 4]  = vertices[i].normal.x;
-            dst[i * 12 + 5]  = vertices[i].normal.y;
-            dst[i * 12 + 6]  = vertices[i].normal.z;
-            dst[i * 12 + 7]  = 0.0f;
-            dst[i * 12 + 8]  = vertices[i].texCoord.x;
-            dst[i * 12 + 9]  = vertices[i].texCoord.y;
-            dst[i * 12 + 10] = 0.0f;
-            dst[i * 12 + 11] = 0.0f;
+        auto writeVertices = [&](void* data) {
+            float* dst = static_cast<float*>(data);
+            for (uint32_t i = 0; i < vertCount; i++) {
+                dst[i * 12 + 0]  = vertices[i].pos.x;
+                dst[i * 12 + 1]  = vertices[i].pos.y;
+                dst[i * 12 + 2]  = vertices[i].pos.z;
+                dst[i * 12 + 3]  = 0.0f;
+                dst[i * 12 + 4]  = vertices[i].normal.x;
+                dst[i * 12 + 5]  = vertices[i].normal.y;
+                dst[i * 12 + 6]  = vertices[i].normal.z;
+                dst[i * 12 + 7]  = 0.0f;
+                dst[i * 12 + 8]  = vertices[i].texCoord.x;
+                dst[i * 12 + 9]  = vertices[i].texCoord.y;
+                dst[i * 12 + 10] = 0.0f;
+                dst[i * 12 + 11] = 0.0f;
+            }
+        };
+
+        VkDeviceSize vertBufSize = decimationBufSizes[DB_VERTEX];
+        if (decimationUseDeviceLocal) {
+            VkBuffer stagingBuf;
+            VkDeviceMemory stagingMem;
+            createBuffer(vertBufSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                stagingBuf, stagingMem);
+            void* data;
+            vkMapMemory(device, stagingMem, 0, vertBufSize, 0, &data);
+            writeVertices(data);
+            vkUnmapMemory(device, stagingMem);
+            copyBuffer(stagingBuf, decimationBufs[DB_VERTEX], vertBufSize);
+            vkDestroyBuffer(device, stagingBuf, nullptr);
+            vkFreeMemory(device, stagingMem, nullptr);
+        } else {
+            void* data;
+            vkMapMemory(device, decimationMem[DB_VERTEX], 0, vertBufSize, 0, &data);
+            writeVertices(data);
+            vkUnmapMemory(device, decimationMem[DB_VERTEX]);
         }
-        vkUnmapMemory(device, decimationMem[DB_VERTEX]);
     }
 
-    std::cout << "  uploading data..." << std::flush;
     // --- Upload index data ---
     {
-        void* data;
-        vkMapMemory(device, decimationMem[DB_INDEX], 0, decimationBufSizes[DB_INDEX], 0, &data);
-        memcpy(data, indices.data(), triCount * 3 * sizeof(uint32_t));
-        vkUnmapMemory(device, decimationMem[DB_INDEX]);
+        VkDeviceSize idxBufSize = (VkDeviceSize)triCount * 3 * sizeof(uint32_t);
+        if (decimationUseDeviceLocal) {
+            VkBuffer stagingBuf;
+            VkDeviceMemory stagingMem;
+            createBuffer(idxBufSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                stagingBuf, stagingMem);
+            void* data;
+            vkMapMemory(device, stagingMem, 0, idxBufSize, 0, &data);
+            memcpy(data, indices.data(), idxBufSize);
+            vkUnmapMemory(device, stagingMem);
+            copyBuffer(stagingBuf, decimationBufs[DB_INDEX], idxBufSize);
+            vkDestroyBuffer(device, stagingBuf, nullptr);
+            vkFreeMemory(device, stagingMem, nullptr);
+        } else {
+            void* data;
+            vkMapMemory(device, decimationMem[DB_INDEX], 0, idxBufSize, 0, &data);
+            memcpy(data, indices.data(), idxBufSize);
+            vkUnmapMemory(device, decimationMem[DB_INDEX]);
+        }
     }
     std::cout << " done" << std::endl;
 
@@ -713,11 +749,15 @@ void App::runDecimation() {
 
     // --- Helper: read uint32_t from counter buffer ---
     auto readCounter = [&](uint32_t index) -> uint32_t {
-        void* data;
-        vkMapMemory(device, decimationMem[DB_COUNTER], 0, decimationBufSizes[DB_COUNTER], 0, &data);
-        uint32_t val = static_cast<uint32_t*>(data)[index];
-        vkUnmapMemory(device, decimationMem[DB_COUNTER]);
-        return val;
+        if (decimationUseDeviceLocal) {
+            return static_cast<uint32_t*>(counterReadbackMapped)[index];
+        } else {
+            void* data;
+            vkMapMemory(device, decimationMem[DB_COUNTER], 0, decimationBufSizes[DB_COUNTER], 0, &data);
+            uint32_t val = static_cast<uint32_t*>(data)[index];
+            vkUnmapMemory(device, decimationMem[DB_COUNTER]);
+            return val;
+        }
     };
 
     // ======================================================================
@@ -769,6 +809,8 @@ void App::runDecimation() {
         "P7-9:select+collapse", "(unused)", "(unused)", "P10:degen", "P11:compact", "P12:copyback"};
     double gpuPassTimeMs[10] = {};
 
+    uint32_t dispatchEdges = maxEdges;
+
     for (uint32_t iteration = 0; iteration < maxDecimationIterations; iteration++) {
         Timer iterTimer;
 
@@ -782,6 +824,8 @@ void App::runDecimation() {
         pc.iteration = iteration;
         pc.costMode = decimationCostMode;
         pc.costQuantBits = decimationCostQuantBits;
+
+        uint32_t edgeDispatchWGs = divUp(dispatchEdges, WORKGROUP_SIZE);
 
         uint32_t K = decimationInnerRounds;
 
@@ -810,9 +854,9 @@ void App::runDecimation() {
         dispatchPass(cmd, 4, pc, divUp(triCount, WORKGROUP_SIZE));
         computeBarrier(cmd);
 
-        // P6: edge cost (over-dispatch, shader reads actual edgeCount from counter)
+        // P6: edge cost (dispatch over known edge bound, shader reads actual edgeCount from counter)
         vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, timestampQueryPool, 3);
-        dispatchPass(cmd, 5, pc, divUp(maxEdges, WORKGROUP_SIZE));
+        dispatchPass(cmd, 5, pc, edgeDispatchWGs);
         computeBarrier(cmd);
         vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, timestampQueryPool, 4);
 
@@ -820,9 +864,9 @@ void App::runDecimation() {
         for (uint32_t round = 0; round < K; round++) {
             dispatchPass(cmd, 6, pc, divUp(triCount, WORKGROUP_SIZE));   // P7: init descriptors
             computeBarrier(cmd);
-            dispatchPass(cmd, 7, pc, divUp(maxEdges, WORKGROUP_SIZE));   // P8: scatter (over-dispatch)
+            dispatchPass(cmd, 7, pc, edgeDispatchWGs);                   // P8: scatter
             computeBarrier(cmd);
-            dispatchPass(cmd, 8, pc, divUp(maxEdges, WORKGROUP_SIZE));   // P9: collapse (over-dispatch)
+            dispatchPass(cmd, 8, pc, edgeDispatchWGs);                   // P9: collapse
             computeBarrier(cmd);
         }
         vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, timestampQueryPool, 5);
@@ -841,6 +885,18 @@ void App::runDecimation() {
         dispatchPass(cmd, 11, pc, divUp(triCount, WORKGROUP_SIZE));
         computeBarrier(cmd);
         vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, timestampQueryPool, 8);
+
+        // Copy counters to host-visible readback buffer (only needed for device-local path)
+        if (decimationUseDeviceLocal) {
+            VkBufferCopy region{};
+            region.size = 256;
+            vkCmdCopyBuffer(cmd, decimationBufs[DB_COUNTER], counterReadbackBuf, 1, &region);
+            VkMemoryBarrier barrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+            barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+            barrier.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+            vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &barrier, 0, nullptr, 0, nullptr);
+        }
 
         submitAndWait(cmd);
 
@@ -884,6 +940,7 @@ void App::runDecimation() {
 
         if (edgeCount == 0 || collapseCount == 0) break;
         triCount = newTriCount;
+        dispatchEdges = edgeCount;
         if (triCount <= static_cast<uint32_t>(originalTriCount * decimationTargetRatio)) {
             std::cout << "  target ratio reached\n";
             break;
@@ -913,29 +970,65 @@ void App::runDecimation() {
 
     // Read back vertices
     {
-        void* data;
-        vkMapMemory(device, decimationMem[DB_VERTEX], 0, decimationBufSizes[DB_VERTEX], 0, &data);
-        float* src = static_cast<float*>(data);
-        for (uint32_t i = 0; i < vertCount; i++) {
-            vertices[i].pos.x      = src[i * 12 + 0];
-            vertices[i].pos.y      = src[i * 12 + 1];
-            vertices[i].pos.z      = src[i * 12 + 2];
-            vertices[i].normal.x   = src[i * 12 + 4];
-            vertices[i].normal.y   = src[i * 12 + 5];
-            vertices[i].normal.z   = src[i * 12 + 6];
-            vertices[i].texCoord.x = src[i * 12 + 8];
-            vertices[i].texCoord.y = src[i * 12 + 9];
+        auto readVertices = [&](void* data) {
+            float* src = static_cast<float*>(data);
+            for (uint32_t i = 0; i < vertCount; i++) {
+                vertices[i].pos.x      = src[i * 12 + 0];
+                vertices[i].pos.y      = src[i * 12 + 1];
+                vertices[i].pos.z      = src[i * 12 + 2];
+                vertices[i].normal.x   = src[i * 12 + 4];
+                vertices[i].normal.y   = src[i * 12 + 5];
+                vertices[i].normal.z   = src[i * 12 + 6];
+                vertices[i].texCoord.x = src[i * 12 + 8];
+                vertices[i].texCoord.y = src[i * 12 + 9];
+            }
+        };
+
+        VkDeviceSize vertBufSize = decimationBufSizes[DB_VERTEX];
+        if (decimationUseDeviceLocal) {
+            VkBuffer stagingBuf;
+            VkDeviceMemory stagingMem;
+            createBuffer(vertBufSize, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                stagingBuf, stagingMem);
+            copyBuffer(decimationBufs[DB_VERTEX], stagingBuf, vertBufSize);
+            void* data;
+            vkMapMemory(device, stagingMem, 0, vertBufSize, 0, &data);
+            readVertices(data);
+            vkUnmapMemory(device, stagingMem);
+            vkDestroyBuffer(device, stagingBuf, nullptr);
+            vkFreeMemory(device, stagingMem, nullptr);
+        } else {
+            void* data;
+            vkMapMemory(device, decimationMem[DB_VERTEX], 0, vertBufSize, 0, &data);
+            readVertices(data);
+            vkUnmapMemory(device, decimationMem[DB_VERTEX]);
         }
-        vkUnmapMemory(device, decimationMem[DB_VERTEX]);
     }
 
     // Read back indices
     {
+        VkDeviceSize idxBufSize = (VkDeviceSize)triCount * 3 * sizeof(uint32_t);
         indices.resize(triCount * 3);
-        void* data;
-        vkMapMemory(device, decimationMem[DB_INDEX], 0, (VkDeviceSize)triCount * 3 * sizeof(uint32_t), 0, &data);
-        memcpy(indices.data(), data, triCount * 3 * sizeof(uint32_t));
-        vkUnmapMemory(device, decimationMem[DB_INDEX]);
+        if (decimationUseDeviceLocal) {
+            VkBuffer stagingBuf;
+            VkDeviceMemory stagingMem;
+            createBuffer(idxBufSize, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                stagingBuf, stagingMem);
+            copyBuffer(decimationBufs[DB_INDEX], stagingBuf, idxBufSize);
+            void* data;
+            vkMapMemory(device, stagingMem, 0, idxBufSize, 0, &data);
+            memcpy(indices.data(), data, idxBufSize);
+            vkUnmapMemory(device, stagingMem);
+            vkDestroyBuffer(device, stagingBuf, nullptr);
+            vkFreeMemory(device, stagingMem, nullptr);
+        } else {
+            void* data;
+            vkMapMemory(device, decimationMem[DB_INDEX], 0, idxBufSize, 0, &data);
+            memcpy(indices.data(), data, idxBufSize);
+            vkUnmapMemory(device, decimationMem[DB_INDEX]);
+        }
     }
 
     // --- Recompute vertex normals from final geometry ---

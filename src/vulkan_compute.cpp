@@ -408,13 +408,62 @@ void App::allocateDecimationBuffers(uint32_t vertCount, uint32_t triCount) {
     decimationBufSizes[DB_SCAN]           = (VkDeviceSize)triCount * 6 * sizeof(uint32_t);
     decimationBufSizes[DB_ALIVE]          = (VkDeviceSize)triCount * sizeof(uint32_t);
 
+    VkBufferUsageFlags storageUsage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
+        | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+
+    decimationUseDeviceLocal = true;
     for (int i = 0; i < DB_COUNT; i++) {
         if (decimationBufSizes[i] == 0) decimationBufSizes[i] = 4;
-        createBuffer(decimationBufSizes[i],
-            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-            decimationBufs[i], decimationMem[i]);
     }
+
+    // Try device-local first; if any allocation fails, fall back to host-visible for all
+    for (int i = 0; i < DB_COUNT; i++) {
+        VkBufferCreateInfo bufInfo{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+        bufInfo.size = decimationBufSizes[i];
+        bufInfo.usage = storageUsage;
+        bufInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        if (vkCreateBuffer(device, &bufInfo, nullptr, &decimationBufs[i]) != VK_SUCCESS) {
+            decimationUseDeviceLocal = false;
+            break;
+        }
+        VkMemoryRequirements memReq;
+        vkGetBufferMemoryRequirements(device, decimationBufs[i], &memReq);
+        VkMemoryAllocateInfo allocInfo{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+        allocInfo.allocationSize = memReq.size;
+        allocInfo.memoryTypeIndex = findMemoryType(memReq.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+        if (vkAllocateMemory(device, &allocInfo, nullptr, &decimationMem[i]) != VK_SUCCESS) {
+            vkDestroyBuffer(device, decimationBufs[i], nullptr);
+            decimationBufs[i] = VK_NULL_HANDLE;
+            decimationUseDeviceLocal = false;
+            break;
+        }
+        vkBindBufferMemory(device, decimationBufs[i], decimationMem[i], 0);
+    }
+
+    if (!decimationUseDeviceLocal) {
+        for (int i = 0; i < DB_COUNT; i++) {
+            if (decimationBufs[i] != VK_NULL_HANDLE) {
+                vkDestroyBuffer(device, decimationBufs[i], nullptr);
+                decimationBufs[i] = VK_NULL_HANDLE;
+            }
+            if (decimationMem[i] != VK_NULL_HANDLE) {
+                vkFreeMemory(device, decimationMem[i], nullptr);
+                decimationMem[i] = VK_NULL_HANDLE;
+            }
+        }
+        std::cout << "  [WARNING] DEVICE_LOCAL alloc failed, falling back to HOST_VISIBLE (slower)\n";
+        for (int i = 0; i < DB_COUNT; i++) {
+            createBuffer(decimationBufSizes[i], storageUsage,
+                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                decimationBufs[i], decimationMem[i]);
+        }
+    }
+
+    createBuffer(256,
+        VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+        counterReadbackBuf, counterReadbackMem);
+    vkMapMemory(device, counterReadbackMem, 0, 256, 0, &counterReadbackMapped);
 }
 
 void App::writeDecimationDescriptorSets() {
@@ -502,6 +551,24 @@ void App::cleanupDecimation() {
         if (decimationMem[i] != VK_NULL_HANDLE)
             vkFreeMemory(device, decimationMem[i], nullptr);
     }
+
+    if (counterReadbackMapped) {
+        vkUnmapMemory(device, counterReadbackMem);
+        counterReadbackMapped = nullptr;
+    }
+    if (counterReadbackBuf != VK_NULL_HANDLE)
+        vkDestroyBuffer(device, counterReadbackBuf, nullptr);
+    if (counterReadbackMem != VK_NULL_HANDLE)
+        vkFreeMemory(device, counterReadbackMem, nullptr);
+    counterReadbackBuf = VK_NULL_HANDLE;
+    counterReadbackMem = VK_NULL_HANDLE;
+
+    if (stagingReadbackBuf != VK_NULL_HANDLE)
+        vkDestroyBuffer(device, stagingReadbackBuf, nullptr);
+    if (stagingReadbackMem != VK_NULL_HANDLE)
+        vkFreeMemory(device, stagingReadbackMem, nullptr);
+    stagingReadbackBuf = VK_NULL_HANDLE;
+    stagingReadbackMem = VK_NULL_HANDLE;
 }
 
 void App::recordComputeCommandBuffer(VkCommandBuffer commandBuffer, int workgroupsCount) {
