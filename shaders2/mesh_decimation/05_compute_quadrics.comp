@@ -94,7 +94,8 @@ void main() {
     barrier();
 
     // --- Load triangle, compute face quadric, accumulate in shared map ---
-    bool valid = (gid < triangleCount);
+    uint actualTriCount = counters[COUNTER_TRIANGLE_COUNT];
+    bool valid = (gid < actualTriCount);
     bool nonDegenerate = false;
 
     uint i0, i1, i2;
@@ -151,7 +152,7 @@ void main() {
     }
 
     // --- Initialize triangle descriptor for atomic-min scatter (fused P7) ---
-    if (gid < triangleCount) {
+    if (gid < actualTriCount) {
         triDescriptor[gid] = 0xFFFFFFFFFFFFFFFFul;
     }
 

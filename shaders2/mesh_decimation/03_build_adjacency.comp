@@ -29,7 +29,7 @@ layout(local_size_x = WORKGROUP_SIZE) in;
 
 void main() {
     uint gid = gl_GlobalInvocationID.x;
-    if (gid >= triangleCount) return;
+    if (gid >= counters[COUNTER_TRIANGLE_COUNT]) return;
 
     uint baseIdx = gid * 3u;
 

@@ -69,7 +69,7 @@ void insertEdge(uint v0, uint v1, uint triIdx) {
 
 void main() {
     uint gid = gl_GlobalInvocationID.x;
-    if (gid >= triangleCount) return;
+    if (gid >= counters[COUNTER_TRIANGLE_COUNT]) return;
 
     uint baseIdx = gid * 3u;
     uint v0 = posIndices[baseIdx + 0u];

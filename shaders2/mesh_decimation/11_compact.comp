@@ -48,7 +48,7 @@ void main() {
 
     // Determine if this triangle is alive
     bool alive = false;
-    if (gid < triangleCount) {
+    if (gid < counters[COUNTER_TRIANGLE_COUNT]) {
         alive = (aliveFlags[gid] != 0u);
     }
 
