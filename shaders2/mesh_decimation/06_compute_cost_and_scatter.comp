@@ -181,25 +181,24 @@ void main() {
         }
     }
 
-    if (cost >= costThreshold) {
+    if (costMode != COST_MODE_PAPER && cost >= costThreshold) {
         edgeCost[gid] = cost;
         edgeFlags[gid] = eFlags;
         return;
     }
 
-    if (costMode != COST_MODE_QEM) {
-        if (!checkFlips(v0, vert0.pos, v1, optPos) ||
-            !checkFlips(v1, vert1.pos, v0, optPos)) {
-            edgeCost[gid] = 1e30;
-            edgeFlags[gid] = eFlags;
-            return;
-        }
+    if (!checkFlips(v0, vert0.pos, v1, optPos) ||
+        !checkFlips(v1, vert1.pos, v0, optPos)) {
+        edgeCost[gid] = 1e30;
+        edgeFlags[gid] = eFlags;
+        return;
     }
 
     // --- Edge is eligible: write cost/target AND scatter to triangles ---
     edgeCost[gid] = cost;
     eFlags |= EDGE_ELIGIBLE;
     edgeFlags[gid] = eFlags;
+    atomicAdd(counters[COUNTER_VERTEX_COUNT], 1u);
 
     float t = (edgeLen > 1e-10) ? clamp(length(optPos - vert0.pos) / edgeLen, 0.0, 1.0) : 0.5;
     vec3 optNormal = normalize(mix(vert0.normal, vert1.normal, t));

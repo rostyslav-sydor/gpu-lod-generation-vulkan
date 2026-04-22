@@ -46,6 +46,21 @@ void App::loadModel() {
     }
     std::cout << "verts and inds before simplification: " << vertices.size() << ' ' << indices.size() << '\n';
 
+    // Normalize model to fit in a unit bounding box centered at origin
+    {
+        glm::vec3 bbMin(FLT_MAX), bbMax(-FLT_MAX);
+        for (auto& v : vertices) {
+            bbMin = glm::min(bbMin, v.pos);
+            bbMax = glm::max(bbMax, v.pos);
+        }
+        glm::vec3 center = (bbMin + bbMax) * 0.5f;
+        float extent = glm::max(bbMax.x - bbMin.x, glm::max(bbMax.y - bbMin.y, bbMax.z - bbMin.z));
+        float scale = (extent > 1e-12f) ? (2.0f / extent) : 1.0f;
+        for (auto& v : vertices) {
+            v.pos = (v.pos - center) * scale;
+        }
+    }
+
     // Reorder mesh for GPU cache locality (spatially nearby triangles become memory-adjacent)
     meshopt_optimizeVertexCache(indices.data(), indices.data(), indices.size(), vertices.size());
     std::vector<uint32_t> remap(vertices.size());
@@ -894,10 +909,14 @@ void App::runDecimation() {
         totalGpuMs = (double)(ts[1] - ts[0]) * timestampPeriodNs * 1e-6;
     }
 
+    uint32_t lastEligible = readCounter(3);
+    uint32_t lastCollapses = readCounter(1);
+    uint32_t lastEdges = readCounter(0);
     std::cout << "  " << maxDecimationIterations << " iterations: "
               << triCount << " tris (was " << originalTriCount << ")"
               << "  gpu=" << std::fixed << std::setprecision(0) << totalGpuMs << "ms"
               << "  total=" << totalUs / 1000 << "ms"
+              << "  last iter: " << lastEdges << " edges, " << lastEligible << " eligible, " << lastCollapses << " collapses"
               << std::defaultfloat << std::endl;
 
     // ======================================================================

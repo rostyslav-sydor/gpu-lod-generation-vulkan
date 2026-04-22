@@ -1245,8 +1245,7 @@ void App::createSyncObjects() {
 
 void App::updateUniformBuffer(uint32_t currentImage) {
     UniformBufferObject ubo{};
-    ubo.model = glm::scale(glm::mat4(1.0f), glm::vec3(0.01f)) *
-        glm::translate(glm::mat4(1.0f), glm::vec3(-5.f, 0.f, 0.f));
+    ubo.model = glm::mat4(1.0f);
 
     ubo.view = glm::lookAt(cameraPos, cameraPos + cameraFront, cameraUp);
     ubo.proj = glm::perspective(glm::radians(45.0f), swapChainExtent.width / (float)swapChainExtent.height, 0.1f, 500.0f);
