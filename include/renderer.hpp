@@ -64,6 +64,7 @@ inline bool useCPUDecimation = (std::getenv("CPU_DECIM") ? std::string(std::gete
 inline uint32_t decimationCostMode = std::getenv("DECIM_MODE") ? std::stoi(std::getenv("DECIM_MODE")) : 0;
 inline uint32_t decimationCostQuantBits = std::getenv("DECIM_QUANT") ? std::stoi(std::getenv("DECIM_QUANT")) : 23;
 inline uint32_t decimationInnerRounds = std::getenv("DECIM_ROUNDS") ? std::stoi(std::getenv("DECIM_ROUNDS")) : 1;
+inline bool decimationLogEnabled = (std::getenv("DECIM_LOG") && std::string(std::getenv("DECIM_LOG")) != "0");
 
 const bool deviceLocalBuffer = false;
 const bool singleBuffer = false;

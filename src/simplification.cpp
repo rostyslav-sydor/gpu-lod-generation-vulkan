@@ -874,6 +874,17 @@ void App::runDecimation() {
     uint32_t triDispatchWGs = divUp(triCount, WORKGROUP_SIZE);
     uint32_t edgeDispatchWGs = divUp(maxEdges, WORKGROUP_SIZE);
 
+    // Per-iteration stats readback buffer: 5 counters per iteration (only when logging)
+    const uint32_t COUNTERS_PER_ITER = 5;
+    VkBuffer iterStatsBuf = VK_NULL_HANDLE;
+    VkDeviceMemory iterStatsMem = VK_NULL_HANDLE;
+    if (decimationLogEnabled) {
+        VkDeviceSize iterStatsBufSize = (VkDeviceSize)maxDecimationIterations * COUNTERS_PER_ITER * sizeof(uint32_t);
+        createBuffer(iterStatsBufSize, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+            iterStatsBuf, iterStatsMem);
+    }
+
     Timer gpuTimer;
     VkCommandBuffer cmd = beginCmd();
 
@@ -923,11 +934,31 @@ void App::runDecimation() {
         computeBarrier(cmd);
         dispatchPass(cmd, 9, pc, triDispatchWGs);    // P12: copyback
         computeBarrier(cmd);
+
+        if (decimationLogEnabled) {
+            VkMemoryBarrier barrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+            barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+            barrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+            vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &barrier, 0, nullptr, 0, nullptr);
+
+            VkBufferCopy region{};
+            region.srcOffset = 0;
+            region.dstOffset = (VkDeviceSize)iteration * COUNTERS_PER_ITER * sizeof(uint32_t);
+            region.size = COUNTERS_PER_ITER * sizeof(uint32_t);
+            vkCmdCopyBuffer(cmd, decimationBufs[DB_COUNTER], iterStatsBuf, 1, &region);
+
+            barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+            barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+            vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                0, 1, &barrier, 0, nullptr, 0, nullptr);
+        }
     }
 
     vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, timestampQueryPool, 1);
 
-    // Copy counters to host-visible readback buffer
+    // Copy final counters to host-visible readback buffer
     if (decimationUseDeviceLocal) {
         VkBufferCopy region{};
         region.size = 256;
@@ -951,6 +982,27 @@ void App::runDecimation() {
         vkGetQueryPoolResults(device, timestampQueryPool, 0, 2, sizeof(ts), ts,
             sizeof(uint64_t), VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT);
         totalGpuMs = (double)(ts[1] - ts[0]) * timestampPeriodNs * 1e-6;
+    }
+
+    // Read per-iteration stats (only when logging)
+    struct IterStats { uint32_t edges, collapses, triangles, eligible, compacted; };
+    std::vector<IterStats> iterData;
+    if (decimationLogEnabled) {
+        VkDeviceSize iterStatsBufSize = (VkDeviceSize)maxDecimationIterations * COUNTERS_PER_ITER * sizeof(uint32_t);
+        iterData.resize(maxDecimationIterations);
+        void* data;
+        vkMapMemory(device, iterStatsMem, 0, iterStatsBufSize, 0, &data);
+        uint32_t* p = static_cast<uint32_t*>(data);
+        for (uint32_t i = 0; i < maxDecimationIterations; i++) {
+            iterData[i].edges     = p[i * COUNTERS_PER_ITER + 0];
+            iterData[i].collapses = p[i * COUNTERS_PER_ITER + 1];
+            iterData[i].triangles = p[i * COUNTERS_PER_ITER + 2];
+            iterData[i].eligible  = p[i * COUNTERS_PER_ITER + 3];
+            iterData[i].compacted = p[i * COUNTERS_PER_ITER + 4];
+        }
+        vkUnmapMemory(device, iterStatsMem);
+        vkDestroyBuffer(device, iterStatsBuf, nullptr);
+        vkFreeMemory(device, iterStatsMem, nullptr);
     }
 
     uint32_t lastEligible = readCounter(3);
@@ -1075,6 +1127,62 @@ void App::runDecimation() {
         }
     }
     std::cout << "Position range of referenced verts: [" << minP << ", " << maxP << "]" << std::endl;
+
+    // ======================================================================
+    // Write CSV log (only with DECIM_LOG=1)
+    // ======================================================================
+    if (decimationLogEnabled) {
+        std::string logPath = "decim_log.csv";
+        bool fileExists = std::ifstream(logPath).good();
+        std::ofstream csv(logPath, std::ios::app);
+
+        if (!fileExists) {
+            csv << "model,vertices,orig_triangles,final_triangles,target_ratio,cost_mode,"
+                   "cost_threshold,quant_bits,max_iterations,gpu_ms,total_ms,"
+                   "hausdorff,avg_vert_dist,avg_normal_dev,min_angle,avg_min_angle,"
+                   "max_aspect,avg_aspect,"
+                   "iteration,edges,eligible,collapses,tri_after\n";
+        }
+
+        auto origInds = meshSnapshots[RENDER_ORIGINAL].inds;
+        auto gpuM = computeMetrics(vertices, indices,
+            static_cast<uint32_t>(origInds.size() / 3),
+            &meshSnapshots[RENDER_ORIGINAL].verts, &origInds);
+
+        std::string baseName = modelPath;
+        auto slash = baseName.find_last_of("/\\");
+        if (slash != std::string::npos) baseName = baseName.substr(slash + 1);
+
+        for (uint32_t i = 0; i < iterData.size(); i++) {
+            csv << baseName << ","
+                << vertCount << ","
+                << originalTriCount << ","
+                << triCount << ","
+                << decimationTargetRatio << ","
+                << decimationCostMode << ","
+                << decimationCostThreshold << ","
+                << decimationCostQuantBits << ","
+                << maxDecimationIterations << ","
+                << std::fixed << std::setprecision(2) << totalGpuMs << ","
+                << (totalUs / 1000) << ","
+                << std::setprecision(6)
+                << gpuM.hausdorffDist << ","
+                << gpuM.avgVertDist << ","
+                << gpuM.avgNormalDevDeg << ","
+                << gpuM.minAngleDeg << ","
+                << gpuM.avgMinAngleDeg << ","
+                << gpuM.maxAspectRatio << ","
+                << gpuM.avgAspectRatio << ","
+                << std::defaultfloat
+                << i << ","
+                << iterData[i].edges << ","
+                << iterData[i].eligible << ","
+                << iterData[i].collapses << ","
+                << iterData[i].triangles << "\n";
+        }
+        csv.close();
+        std::cout << "Logged " << iterData.size() << " iterations to " << logPath << std::endl;
+    }
 }
 
 // ============================================================================
