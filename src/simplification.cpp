@@ -802,6 +802,7 @@ void App::runDecimation() {
         pc.iteration = 0;
         pc.costMode = decimationCostMode;
         pc.costQuantBits = decimationCostQuantBits;
+        pc.targetTriCount = std::max(1u, (uint32_t)(triCount * decimationTargetRatio));
 
         // Pass 1: Hash Vertices
         dispatchPass(cmd, 0, pc, divUp(vertCount, WORKGROUP_SIZE));
@@ -854,6 +855,7 @@ void App::runDecimation() {
         pc.iteration = iteration;
         pc.costMode = decimationCostMode;
         pc.costQuantBits = decimationCostQuantBits;
+        pc.targetTriCount = std::max(1u, (uint32_t)(triCount * decimationTargetRatio));
 
         // Clear per-iteration counters (0,1,3,4) but preserve counter 2 (COUNTER_TRIANGLE_COUNT)
         vkCmdFillBuffer(cmd, decimationBufs[DB_COUNTER], 0, 8, 0);

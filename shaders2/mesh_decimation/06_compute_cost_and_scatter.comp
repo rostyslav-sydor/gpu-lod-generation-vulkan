@@ -105,6 +105,8 @@ void main() {
     uint actualEdgeCount = counters[COUNTER_EDGE_COUNT];
     if (gid >= actualEdgeCount) return;
 
+    if (counters[COUNTER_TRIANGLE_COUNT] <= targetTriCount) return;
+
     uvec2 edge = edges[gid];
     uint v0 = edge.x;
     uint v1 = edge.y;

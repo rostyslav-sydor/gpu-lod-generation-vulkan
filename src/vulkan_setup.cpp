@@ -955,9 +955,9 @@ void App::processInput(float deltaTime) {
     if (glfwGetKey(window, GLFW_KEY_S) == GLFW_PRESS)
         cameraPos -= cameraFront * velocity;
     if (glfwGetKey(window, GLFW_KEY_A) == GLFW_PRESS)
-        cameraPos -= right * velocity;
-    if (glfwGetKey(window, GLFW_KEY_D) == GLFW_PRESS)
         cameraPos += right * velocity;
+    if (glfwGetKey(window, GLFW_KEY_D) == GLFW_PRESS)
+        cameraPos -= right * velocity;
     if (glfwGetKey(window, GLFW_KEY_SPACE) == GLFW_PRESS)
         cameraPos += cameraUp * velocity;
     if (glfwGetKey(window, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS)
