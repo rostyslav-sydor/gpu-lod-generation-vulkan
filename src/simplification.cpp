@@ -440,6 +440,80 @@ struct MeshMetrics {
     float avgNormalDevDeg = 0.0f;
 };
 
+struct TriGrid {
+    glm::vec3 bbMin;
+    float cellSize;
+    int res;
+    std::vector<std::vector<uint32_t>> cells;
+
+    TriGrid(const std::vector<Vertex>& verts, const std::vector<uint32_t>& inds) {
+        uint32_t triCount = static_cast<uint32_t>(inds.size() / 3);
+        bbMin = glm::vec3(FLT_MAX);
+        glm::vec3 bbMax(-FLT_MAX);
+        for (uint32_t t = 0; t < triCount; t++) {
+            for (int k = 0; k < 3; k++) {
+                glm::vec3 p = verts[inds[t*3+k]].pos;
+                bbMin = glm::min(bbMin, p);
+                bbMax = glm::max(bbMax, p);
+            }
+        }
+        glm::vec3 extent = bbMax - bbMin;
+        float maxExt = std::max({extent.x, extent.y, extent.z, 1e-12f});
+        res = std::min(128, std::max(1, (int)std::cbrt(triCount * 0.5)));
+        cellSize = maxExt / res + 1e-12f;
+        cells.resize(res * res * res);
+
+        for (uint32_t t = 0; t < triCount; t++) {
+            glm::vec3 tMin(FLT_MAX), tMax(-FLT_MAX);
+            for (int k = 0; k < 3; k++) {
+                glm::vec3 p = verts[inds[t*3+k]].pos;
+                tMin = glm::min(tMin, p);
+                tMax = glm::max(tMax, p);
+            }
+            glm::ivec3 lo = glm::clamp(glm::ivec3((tMin - bbMin) / cellSize), glm::ivec3(0), glm::ivec3(res-1));
+            glm::ivec3 hi = glm::clamp(glm::ivec3((tMax - bbMin) / cellSize), glm::ivec3(0), glm::ivec3(res-1));
+            for (int z = lo.z; z <= hi.z; z++)
+                for (int y = lo.y; y <= hi.y; y++)
+                    for (int x = lo.x; x <= hi.x; x++)
+                        cells[z*res*res + y*res + x].push_back(t);
+        }
+    }
+
+    float nearestDist(glm::vec3 p, const std::vector<Vertex>& verts, const std::vector<uint32_t>& inds,
+                      glm::vec3* outNormal = nullptr) const {
+        glm::ivec3 center = glm::clamp(glm::ivec3((p - bbMin) / cellSize), glm::ivec3(0), glm::ivec3(res-1));
+        float bestDist = FLT_MAX;
+        glm::vec3 bestNorm(0,0,1);
+
+        for (int radius = 0; radius < res; radius++) {
+            if (bestDist < cellSize * radius) break;
+            glm::ivec3 lo = glm::max(center - glm::ivec3(radius), glm::ivec3(0));
+            glm::ivec3 hi = glm::min(center + glm::ivec3(radius), glm::ivec3(res-1));
+            for (int z = lo.z; z <= hi.z; z++)
+                for (int y = lo.y; y <= hi.y; y++)
+                    for (int x = lo.x; x <= hi.x; x++) {
+                        if (radius > 0 && x > lo.x && x < hi.x && y > lo.y && y < hi.y && z > lo.z && z < hi.z)
+                            continue;
+                        for (uint32_t t : cells[z*res*res + y*res + x]) {
+                            glm::vec3 a = verts[inds[t*3+0]].pos;
+                            glm::vec3 b = verts[inds[t*3+1]].pos;
+                            glm::vec3 c = verts[inds[t*3+2]].pos;
+                            float d = pointToTriDist(p, a, b, c);
+                            if (d < bestDist) {
+                                bestDist = d;
+                                if (outNormal) {
+                                    glm::vec3 n = glm::cross(b-a, c-a);
+                                    if (glm::length(n) > 1e-12f) bestNorm = glm::normalize(n);
+                                }
+                            }
+                        }
+                    }
+        }
+        if (outNormal) *outNormal = bestNorm;
+        return bestDist;
+    }
+};
+
 static MeshMetrics computeMetrics(
     const std::vector<Vertex>& verts,
     const std::vector<uint32_t>& inds,
@@ -477,31 +551,16 @@ static MeshMetrics computeMetrics(
     }
 
     if (origVerts && origInds && !origInds->empty()) {
-        uint32_t origTriCount = static_cast<uint32_t>(origInds->size() / 3);
-
-        const uint32_t MAX_ORIG_TRIS_FOR_METRICS = 10000;
-        uint32_t stride = 1;
-        uint32_t sampledOrigTriCount = origTriCount;
-        if (origTriCount > MAX_ORIG_TRIS_FOR_METRICS) {
-            stride = (origTriCount + MAX_ORIG_TRIS_FOR_METRICS - 1) / MAX_ORIG_TRIS_FOR_METRICS;
-            sampledOrigTriCount = (origTriCount + stride - 1) / stride;
-        }
+        TriGrid grid(*origVerts, *origInds);
 
         std::unordered_set<uint32_t> usedVerts(inds.begin(), inds.end());
         float maxDist = 0.0f, sumDist = 0.0f;
         uint32_t distCount = 0;
         for (uint32_t vi : usedVerts) {
             if (vi >= verts.size()) continue;
-            glm::vec3 p = verts[vi].pos;
-            float bestDist = std::numeric_limits<float>::max();
-            for (uint32_t t = 0; t < origTriCount; t += stride) {
-                glm::vec3 oa = (*origVerts)[(*origInds)[t*3+0]].pos;
-                glm::vec3 ob = (*origVerts)[(*origInds)[t*3+1]].pos;
-                glm::vec3 oc = (*origVerts)[(*origInds)[t*3+2]].pos;
-                bestDist = std::min(bestDist, pointToTriDist(p, oa, ob, oc));
-            }
-            maxDist = std::max(maxDist, bestDist);
-            sumDist += bestDist;
+            float d = grid.nearestDist(verts[vi].pos, *origVerts, *origInds);
+            maxDist = std::max(maxDist, d);
+            sumDist += d;
             distCount++;
         }
         m.hausdorffDist = maxDist;
@@ -518,30 +577,13 @@ static MeshMetrics computeMetrics(
             fn = glm::normalize(fn);
             glm::vec3 centroid = (verts[i0].pos + verts[i1].pos + verts[i2].pos) / 3.0f;
 
-            float bestDistSq = std::numeric_limits<float>::max();
-            glm::vec3 bestNormal(0,0,1);
-            for (uint32_t ot = 0; ot < origTriCount; ot += stride) {
-                glm::vec3 oa = (*origVerts)[(*origInds)[ot*3+0]].pos;
-                glm::vec3 ob = (*origVerts)[(*origInds)[ot*3+1]].pos;
-                glm::vec3 oc = (*origVerts)[(*origInds)[ot*3+2]].pos;
-                glm::vec3 oCentroid = (oa + ob + oc) / 3.0f;
-                float distSq = glm::dot(oCentroid - centroid, oCentroid - centroid);
-                if (distSq < bestDistSq) {
-                    bestDistSq = distSq;
-                    glm::vec3 ofn = glm::cross(ob - oa, oc - oa);
-                    if (glm::length(ofn) > 1e-12f) bestNormal = glm::normalize(ofn);
-                }
-            }
+            glm::vec3 bestNormal;
+            grid.nearestDist(centroid, *origVerts, *origInds, &bestNormal);
             float cosA = glm::clamp(glm::dot(fn, bestNormal), -1.0f, 1.0f);
             sumNormalDev += glm::degrees(std::acos(cosA));
             normalCount++;
         }
         m.avgNormalDevDeg = (normalCount > 0) ? sumNormalDev / normalCount : 0.0f;
-
-        if (stride > 1) {
-            std::cout << "  (metrics sampled 1/" << stride
-                      << " of original triangles for speed)" << std::endl;
-        }
     }
 
     return m;
