@@ -467,20 +467,22 @@ void App::allocateDecimationBuffers(uint32_t vertCount, uint32_t triCount) {
 }
 
 void App::writeDecimationDescriptorSets() {
-    VkDescriptorSetLayout layouts[] = { decimationDescSetLayout0, decimationDescSetLayout1 };
-    VkDescriptorSet sets[2];
+    if (decimationDescSet0 == VK_NULL_HANDLE) {
+        VkDescriptorSetLayout layouts[] = { decimationDescSetLayout0, decimationDescSetLayout1 };
+        VkDescriptorSet sets[2];
 
-    VkDescriptorSetAllocateInfo allocInfo{};
-    allocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
-    allocInfo.descriptorPool = descriptorPool;
-    allocInfo.descriptorSetCount = 2;
-    allocInfo.pSetLayouts = layouts;
+        VkDescriptorSetAllocateInfo allocInfo{};
+        allocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+        allocInfo.descriptorPool = descriptorPool;
+        allocInfo.descriptorSetCount = 2;
+        allocInfo.pSetLayouts = layouts;
 
-    if (vkAllocateDescriptorSets(device, &allocInfo, sets) != VK_SUCCESS) {
-        throw std::runtime_error("failed to allocate decimation descriptor sets!");
+        if (vkAllocateDescriptorSets(device, &allocInfo, sets) != VK_SUCCESS) {
+            throw std::runtime_error("failed to allocate decimation descriptor sets!");
+        }
+        decimationDescSet0 = sets[0];
+        decimationDescSet1 = sets[1];
     }
-    decimationDescSet0 = sets[0];
-    decimationDescSet1 = sets[1];
 
     // Set 0: bindings 0-15 map to DB_VERTEX..DB_COUNTER
     // (binding 14 = DB_HASHMAP_EDGE, which replaced the old combined DB_HASHMAP)
