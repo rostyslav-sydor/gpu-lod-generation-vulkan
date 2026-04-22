@@ -285,6 +285,15 @@ private:
 
     bool framebufferResized = false;
 
+    // Interactive decimation state
+    bool interactiveDecimReady = false;
+    uint32_t interactiveVertCount = 0;
+    uint32_t interactiveTriCount = 0;
+    uint32_t interactiveOrigTriCount = 0;
+    uint32_t interactiveMaxEdges = 0;
+    uint32_t interactiveHashMapSize = 0;
+    uint32_t interactiveIteration = 0;
+
     MeshSnapshot meshSnapshots[RENDER_MODE_COUNT];
     RenderMode activeRenderMode = RENDER_GPU;
 
@@ -431,8 +440,12 @@ private:
     void allocateDecimationBuffers(uint32_t vertexCount, uint32_t triangleCount);
     void writeDecimationDescriptorSets();
     void runDecimation();
+    void initInteractiveDecimation();
+    void stepInteractiveDecimation();
+    void readbackDecimationState();
     void runCPUDecimation();
     void createMeshBuffers();
+    void updateMeshBuffersForMode(RenderMode mode);
     void cleanupMeshBuffers();
     void printDecimationMetrics();
     void cleanupDecimation();

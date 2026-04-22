@@ -902,6 +902,14 @@ void App::keyCallback(GLFWwindow* window, int key, int scancode, int action, int
         const char* names[] = {"GPU", "CPU (meshopt)", "Original"};
         std::cout << "Render mode: " << names[newMode] << std::endl;
     }
+
+    if (key == GLFW_KEY_N) {
+        if (!app->interactiveDecimReady) {
+            app->initInteractiveDecimation();
+        } else {
+            app->stepInteractiveDecimation();
+        }
+    }
 }
 
 void App::mouseCallback(GLFWwindow* window, double xpos, double ypos) {

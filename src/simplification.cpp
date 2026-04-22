@@ -1077,6 +1077,437 @@ void App::runDecimation() {
     std::cout << "Position range of referenced verts: [" << minP << ", " << maxP << "]" << std::endl;
 }
 
+// ============================================================================
+// Interactive (step-through) decimation — separate slow path for visualization
+// ============================================================================
+
+void App::readbackDecimationState() {
+    uint32_t vertCount = interactiveVertCount;
+
+    // Copy counters to readback
+    if (decimationUseDeviceLocal) {
+        VkCommandBuffer cmd2;
+        {
+            vkResetCommandBuffer(computeCommandBuffer, 0);
+            VkCommandBufferBeginInfo beginInfo{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+            beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+            vkBeginCommandBuffer(computeCommandBuffer, &beginInfo);
+
+            VkBufferCopy region{};
+            region.size = 256;
+            vkCmdCopyBuffer(computeCommandBuffer, decimationBufs[DB_COUNTER], counterReadbackBuf, 1, &region);
+            VkMemoryBarrier barrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+            barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+            barrier.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+            vkCmdPipelineBarrier(computeCommandBuffer, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &barrier, 0, nullptr, 0, nullptr);
+
+            vkEndCommandBuffer(computeCommandBuffer);
+            VkSubmitInfo submitInfo{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+            submitInfo.commandBufferCount = 1;
+            submitInfo.pCommandBuffers = &computeCommandBuffer;
+            vkResetFences(device, 1, &computeFence);
+            vkQueueSubmit(computeQueue, 1, &submitInfo, computeFence);
+            vkWaitForFences(device, 1, &computeFence, VK_TRUE, UINT64_MAX);
+        }
+    }
+
+    auto readCounter = [&](uint32_t index) -> uint32_t {
+        if (decimationUseDeviceLocal) {
+            return static_cast<uint32_t*>(counterReadbackMapped)[index];
+        } else {
+            void* data;
+            vkMapMemory(device, decimationMem[DB_COUNTER], 0, decimationBufSizes[DB_COUNTER], 0, &data);
+            uint32_t val = static_cast<uint32_t*>(data)[index];
+            vkUnmapMemory(device, decimationMem[DB_COUNTER]);
+            return val;
+        }
+    };
+
+    interactiveTriCount = readCounter(2);
+
+    // Read back vertices
+    {
+        auto readVertices = [&](void* data) {
+            float* src = static_cast<float*>(data);
+            for (uint32_t i = 0; i < vertCount; i++) {
+                vertices[i].pos.x      = src[i * 12 + 0];
+                vertices[i].pos.y      = src[i * 12 + 1];
+                vertices[i].pos.z      = src[i * 12 + 2];
+                vertices[i].normal.x   = src[i * 12 + 4];
+                vertices[i].normal.y   = src[i * 12 + 5];
+                vertices[i].normal.z   = src[i * 12 + 6];
+                vertices[i].texCoord.x = src[i * 12 + 8];
+                vertices[i].texCoord.y = src[i * 12 + 9];
+            }
+        };
+
+        VkDeviceSize vertBufSize = decimationBufSizes[DB_VERTEX];
+        if (decimationUseDeviceLocal) {
+            VkBuffer stagingBuf;
+            VkDeviceMemory stagingMem;
+            createBuffer(vertBufSize, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                stagingBuf, stagingMem);
+            copyBuffer(decimationBufs[DB_VERTEX], stagingBuf, vertBufSize);
+            void* data;
+            vkMapMemory(device, stagingMem, 0, vertBufSize, 0, &data);
+            readVertices(data);
+            vkUnmapMemory(device, stagingMem);
+            vkDestroyBuffer(device, stagingBuf, nullptr);
+            vkFreeMemory(device, stagingMem, nullptr);
+        } else {
+            void* data;
+            vkMapMemory(device, decimationMem[DB_VERTEX], 0, vertBufSize, 0, &data);
+            readVertices(data);
+            vkUnmapMemory(device, decimationMem[DB_VERTEX]);
+        }
+    }
+
+    // Read back indices
+    uint32_t triCount = interactiveTriCount;
+    {
+        VkDeviceSize idxBufSize = (VkDeviceSize)triCount * 3 * sizeof(uint32_t);
+        indices.resize(triCount * 3);
+        if (decimationUseDeviceLocal) {
+            VkBuffer stagingBuf;
+            VkDeviceMemory stagingMem;
+            createBuffer(idxBufSize, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                stagingBuf, stagingMem);
+            copyBuffer(decimationBufs[DB_INDEX], stagingBuf, idxBufSize);
+            void* data;
+            vkMapMemory(device, stagingMem, 0, idxBufSize, 0, &data);
+            memcpy(indices.data(), data, idxBufSize);
+            vkUnmapMemory(device, stagingMem);
+            vkDestroyBuffer(device, stagingBuf, nullptr);
+            vkFreeMemory(device, stagingMem, nullptr);
+        } else {
+            void* data;
+            vkMapMemory(device, decimationMem[DB_INDEX], 0, idxBufSize, 0, &data);
+            memcpy(indices.data(), data, idxBufSize);
+            vkUnmapMemory(device, decimationMem[DB_INDEX]);
+        }
+    }
+
+    // Recompute normals
+    for (uint32_t i = 0; i < vertCount; i++)
+        vertices[i].normal = {0, 0, 0};
+    for (uint32_t t = 0; t < triCount; t++) {
+        uint32_t i0 = indices[t*3+0], i1 = indices[t*3+1], i2 = indices[t*3+2];
+        if (i0 >= vertCount || i1 >= vertCount || i2 >= vertCount) continue;
+        glm::vec3 fn = glm::cross(vertices[i1].pos - vertices[i0].pos, vertices[i2].pos - vertices[i0].pos);
+        vertices[i0].normal += fn;
+        vertices[i1].normal += fn;
+        vertices[i2].normal += fn;
+    }
+    for (uint32_t i = 0; i < vertCount; i++) {
+        float len = glm::length(vertices[i].normal);
+        if (len > 1e-8f) vertices[i].normal /= len;
+    }
+
+    uint32_t lastEdges = readCounter(0);
+    uint32_t lastCollapses = readCounter(1);
+    uint32_t lastEligible = readCounter(3);
+    std::cout << "[step " << interactiveIteration << "] "
+              << triCount << " tris (was " << interactiveOrigTriCount << ")  "
+              << lastEdges << " edges, " << lastEligible << " eligible, "
+              << lastCollapses << " collapses" << std::endl;
+}
+
+void App::initInteractiveDecimation() {
+    // Always start from the original mesh
+    auto& orig = meshSnapshots[RENDER_ORIGINAL];
+    if (!orig.valid) {
+        std::cout << "No original mesh available for interactive decimation\n";
+        return;
+    }
+    vertices = orig.verts;
+    indices = orig.inds;
+
+    interactiveVertCount = static_cast<uint32_t>(vertices.size());
+    interactiveTriCount  = static_cast<uint32_t>(indices.size() / 3);
+    interactiveOrigTriCount = interactiveTriCount;
+    interactiveMaxEdges = interactiveTriCount * 3;
+    interactiveIteration = 0;
+
+    auto np2 = [](uint32_t v) { v--; v|=v>>1; v|=v>>2; v|=v>>4; v|=v>>8; v|=v>>16; v++; return v; };
+    interactiveHashMapSize = np2(std::max(interactiveVertCount, interactiveMaxEdges) * 2);
+
+    std::cout << "Interactive decimation init: " << interactiveVertCount << " verts, "
+              << interactiveTriCount << " tris\n";
+
+    allocateDecimationBuffers(interactiveVertCount, interactiveTriCount);
+    writeDecimationDescriptorSets();
+
+    const uint32_t WORKGROUP_SIZE = 256;
+    uint32_t vertCount = interactiveVertCount;
+    uint32_t triCount = interactiveTriCount;
+
+    // Upload vertices
+    {
+        auto writeVertices = [&](void* data) {
+            float* dst = static_cast<float*>(data);
+            for (uint32_t i = 0; i < vertCount; i++) {
+                dst[i*12+0]  = vertices[i].pos.x;     dst[i*12+1]  = vertices[i].pos.y;
+                dst[i*12+2]  = vertices[i].pos.z;     dst[i*12+3]  = 0.0f;
+                dst[i*12+4]  = vertices[i].normal.x;  dst[i*12+5]  = vertices[i].normal.y;
+                dst[i*12+6]  = vertices[i].normal.z;  dst[i*12+7]  = 0.0f;
+                dst[i*12+8]  = vertices[i].texCoord.x; dst[i*12+9] = vertices[i].texCoord.y;
+                dst[i*12+10] = 0.0f;                   dst[i*12+11] = 0.0f;
+            }
+        };
+        VkDeviceSize vertBufSize = decimationBufSizes[DB_VERTEX];
+        if (decimationUseDeviceLocal) {
+            VkBuffer stagingBuf; VkDeviceMemory stagingMem;
+            createBuffer(vertBufSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                stagingBuf, stagingMem);
+            void* data;
+            vkMapMemory(device, stagingMem, 0, vertBufSize, 0, &data);
+            writeVertices(data);
+            vkUnmapMemory(device, stagingMem);
+            copyBuffer(stagingBuf, decimationBufs[DB_VERTEX], vertBufSize);
+            vkDestroyBuffer(device, stagingBuf, nullptr);
+            vkFreeMemory(device, stagingMem, nullptr);
+        } else {
+            void* data;
+            vkMapMemory(device, decimationMem[DB_VERTEX], 0, vertBufSize, 0, &data);
+            writeVertices(data);
+            vkUnmapMemory(device, decimationMem[DB_VERTEX]);
+        }
+    }
+
+    // Upload indices
+    {
+        VkDeviceSize idxBufSize = (VkDeviceSize)triCount * 3 * sizeof(uint32_t);
+        if (decimationUseDeviceLocal) {
+            VkBuffer stagingBuf; VkDeviceMemory stagingMem;
+            createBuffer(idxBufSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                stagingBuf, stagingMem);
+            void* data;
+            vkMapMemory(device, stagingMem, 0, idxBufSize, 0, &data);
+            memcpy(data, indices.data(), idxBufSize);
+            vkUnmapMemory(device, stagingMem);
+            copyBuffer(stagingBuf, decimationBufs[DB_INDEX], idxBufSize);
+            vkDestroyBuffer(device, stagingBuf, nullptr);
+            vkFreeMemory(device, stagingMem, nullptr);
+        } else {
+            void* data;
+            vkMapMemory(device, decimationMem[DB_INDEX], 0, idxBufSize, 0, &data);
+            memcpy(data, indices.data(), idxBufSize);
+            vkUnmapMemory(device, decimationMem[DB_INDEX]);
+        }
+    }
+
+    // Run Phase 1: hash + dedup
+    {
+        vkResetCommandBuffer(computeCommandBuffer, 0);
+        VkCommandBufferBeginInfo beginInfo{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+        beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+        vkBeginCommandBuffer(computeCommandBuffer, &beginInfo);
+
+        VkDescriptorSet sets[] = { decimationDescSet0, decimationDescSet1 };
+        vkCmdBindDescriptorSets(computeCommandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
+            decimationPipelineLayout, 0, 2, sets, 0, nullptr);
+
+        vkCmdFillBuffer(computeCommandBuffer, decimationBufs[DB_HASHMAP_VERTEX], 0, decimationBufSizes[DB_HASHMAP_VERTEX], 0xFFFFFFFF);
+        vkCmdFillBuffer(computeCommandBuffer, decimationBufs[DB_HASHMAP_POSITION], 0, decimationBufSizes[DB_HASHMAP_POSITION], 0xFFFFFFFF);
+        vkCmdFillBuffer(computeCommandBuffer, decimationBufs[DB_HASHMAP_EDGE], 0, decimationBufSizes[DB_HASHMAP_EDGE], 0xFFFFFFFF);
+        vkCmdFillBuffer(computeCommandBuffer, decimationBufs[DB_VERTEX_FLAGS], 0, decimationBufSizes[DB_VERTEX_FLAGS], 0);
+        vkCmdFillBuffer(computeCommandBuffer, decimationBufs[DB_COUNTER], 0, decimationBufSizes[DB_COUNTER], 0);
+
+        {
+            VkMemoryBarrier barrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+            barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+            barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+            vkCmdPipelineBarrier(computeCommandBuffer, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &barrier, 0, nullptr, 0, nullptr);
+        }
+
+        DecimationPushConstants pc{};
+        pc.vertexCount = vertCount;
+        pc.triangleCount = triCount;
+        pc.hashMapSize = interactiveHashMapSize;
+        pc.costThreshold = decimationCostThreshold;
+        pc.costMode = decimationCostMode;
+        pc.costQuantBits = decimationCostQuantBits;
+        pc.targetTriCount = std::max(1u, (uint32_t)(triCount * decimationTargetRatio));
+
+        auto dispatchPass = [&](uint32_t passIdx, uint32_t workgroups) {
+            vkCmdBindPipeline(computeCommandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, decimationPipelines[passIdx]);
+            vkCmdPushConstants(computeCommandBuffer, decimationPipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT,
+                0, sizeof(DecimationPushConstants), &pc);
+            vkCmdDispatch(computeCommandBuffer, workgroups, 1, 1);
+        };
+        auto computeBarrier = [&]() {
+            VkMemoryBarrier barrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+            barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+            barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+            vkCmdPipelineBarrier(computeCommandBuffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &barrier, 0, nullptr, 0, nullptr);
+        };
+
+        dispatchPass(0, divUp(vertCount, WORKGROUP_SIZE));
+        computeBarrier();
+        dispatchPass(1, divUp(triCount, WORKGROUP_SIZE));
+        computeBarrier();
+
+        // Initialize COUNTER_TRIANGLE_COUNT
+        uint32_t initVal = triCount;
+        vkCmdUpdateBuffer(computeCommandBuffer, decimationBufs[DB_COUNTER],
+            2 * sizeof(uint32_t), sizeof(uint32_t), &initVal);
+        {
+            VkMemoryBarrier barrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+            barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+            barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+            vkCmdPipelineBarrier(computeCommandBuffer, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &barrier, 0, nullptr, 0, nullptr);
+        }
+
+        vkEndCommandBuffer(computeCommandBuffer);
+        VkSubmitInfo submitInfo{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+        submitInfo.commandBufferCount = 1;
+        submitInfo.pCommandBuffers = &computeCommandBuffer;
+        vkResetFences(device, 1, &computeFence);
+        vkQueueSubmit(computeQueue, 1, &submitInfo, computeFence);
+        vkWaitForFences(device, 1, &computeFence, VK_TRUE, UINT64_MAX);
+    }
+
+    interactiveDecimReady = true;
+
+    // Store original mesh as GPU snapshot and update render buffers
+    meshSnapshots[RENDER_GPU].verts = vertices;
+    meshSnapshots[RENDER_GPU].inds = indices;
+    meshSnapshots[RENDER_GPU].valid = true;
+    updateMeshBuffersForMode(RENDER_GPU);
+    activeRenderMode = RENDER_GPU;
+
+    std::cout << "Interactive decimation ready. Press [N] to step, [O] for original.\n";
+}
+
+void App::stepInteractiveDecimation() {
+    if (!interactiveDecimReady) return;
+
+    const uint32_t WORKGROUP_SIZE = 256;
+    uint32_t vertCount = interactiveVertCount;
+    uint32_t triCount = interactiveTriCount;
+
+    uint32_t triDispatchWGs = divUp(interactiveOrigTriCount, WORKGROUP_SIZE);
+    uint32_t edgeDispatchWGs = divUp(interactiveMaxEdges, WORKGROUP_SIZE);
+
+    vkResetCommandBuffer(computeCommandBuffer, 0);
+    VkCommandBufferBeginInfo beginInfo{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+    beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    vkBeginCommandBuffer(computeCommandBuffer, &beginInfo);
+
+    VkDescriptorSet sets[] = { decimationDescSet0, decimationDescSet1 };
+    vkCmdBindDescriptorSets(computeCommandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
+        decimationPipelineLayout, 0, 2, sets, 0, nullptr);
+
+    auto dispatchPass = [&](uint32_t passIdx, const DecimationPushConstants& pc, uint32_t workgroups) {
+        vkCmdBindPipeline(computeCommandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, decimationPipelines[passIdx]);
+        vkCmdPushConstants(computeCommandBuffer, decimationPipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT,
+            0, sizeof(DecimationPushConstants), &pc);
+        vkCmdDispatch(computeCommandBuffer, workgroups, 1, 1);
+    };
+    auto computeBarrier = [&]() {
+        VkMemoryBarrier barrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+        barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+        barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+        vkCmdPipelineBarrier(computeCommandBuffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &barrier, 0, nullptr, 0, nullptr);
+    };
+    auto transferToComputeBarrier = [&]() {
+        VkMemoryBarrier barrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+        barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+        vkCmdPipelineBarrier(computeCommandBuffer, VK_PIPELINE_STAGE_TRANSFER_BIT,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &barrier, 0, nullptr, 0, nullptr);
+    };
+
+    DecimationPushConstants pc{};
+    pc.vertexCount = vertCount;
+    pc.triangleCount = interactiveOrigTriCount;
+    pc.edgeCount = interactiveMaxEdges;
+    pc.hashMapSize = interactiveHashMapSize;
+    pc.costThreshold = decimationCostThreshold;
+    pc.iteration = interactiveIteration;
+    pc.costMode = decimationCostMode;
+    pc.costQuantBits = decimationCostQuantBits;
+    pc.targetTriCount = std::max(1u, (uint32_t)(interactiveOrigTriCount * decimationTargetRatio));
+
+    // Clear per-iteration state
+    vkCmdFillBuffer(computeCommandBuffer, decimationBufs[DB_COUNTER], 0, 8, 0);
+    vkCmdFillBuffer(computeCommandBuffer, decimationBufs[DB_COUNTER], 12, 8, 0);
+    vkCmdFillBuffer(computeCommandBuffer, decimationBufs[DB_ADJ_HEAD], 0, decimationBufSizes[DB_ADJ_HEAD], 0xFFFFFFFF);
+    vkCmdFillBuffer(computeCommandBuffer, decimationBufs[DB_HASHMAP_EDGE], 0, decimationBufSizes[DB_HASHMAP_EDGE], 0xFFFFFFFF);
+    vkCmdFillBuffer(computeCommandBuffer, decimationBufs[DB_QUADRIC], 0, decimationBufSizes[DB_QUADRIC], 0);
+    transferToComputeBarrier();
+
+    dispatchPass(2, pc, triDispatchWGs);    // build adjacency
+    computeBarrier();
+    dispatchPass(3, pc, triDispatchWGs);    // build edges
+    computeBarrier();
+    dispatchPass(4, pc, triDispatchWGs);    // quadrics + init descriptors
+    computeBarrier();
+    dispatchPass(5, pc, edgeDispatchWGs);   // cost + scatter
+    computeBarrier();
+    dispatchPass(6, pc, edgeDispatchWGs);   // collapse
+    computeBarrier();
+    dispatchPass(7, pc, triDispatchWGs);    // mark degenerate
+    computeBarrier();
+    dispatchPass(8, pc, triDispatchWGs);    // compact
+    computeBarrier();
+    dispatchPass(9, pc, triDispatchWGs);    // copyback
+    computeBarrier();
+
+    vkEndCommandBuffer(computeCommandBuffer);
+    VkSubmitInfo submitInfo{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+    submitInfo.commandBufferCount = 1;
+    submitInfo.pCommandBuffers = &computeCommandBuffer;
+    vkResetFences(device, 1, &computeFence);
+    vkQueueSubmit(computeQueue, 1, &submitInfo, computeFence);
+    vkWaitForFences(device, 1, &computeFence, VK_TRUE, UINT64_MAX);
+
+    interactiveIteration++;
+
+    // Read back and update render mesh
+    readbackDecimationState();
+
+    meshSnapshots[RENDER_GPU].verts = vertices;
+    meshSnapshots[RENDER_GPU].inds = indices;
+    meshSnapshots[RENDER_GPU].valid = true;
+    updateMeshBuffersForMode(RENDER_GPU);
+}
+
+void App::updateMeshBuffersForMode(RenderMode mode) {
+    auto& snap = meshSnapshots[mode];
+    if (!snap.valid || snap.verts.empty() || snap.inds.empty()) return;
+
+    // Destroy old buffers
+    if (snap.vertBuf != VK_NULL_HANDLE) {
+        vkDeviceWaitIdle(device);
+        vkDestroyBuffer(device, snap.vertBuf, nullptr);
+        vkFreeMemory(device, snap.vertMem, nullptr);
+        snap.vertBuf = VK_NULL_HANDLE;
+    }
+    if (snap.idxBuf != VK_NULL_HANDLE) {
+        vkDestroyBuffer(device, snap.idxBuf, nullptr);
+        vkFreeMemory(device, snap.idxMem, nullptr);
+        snap.idxBuf = VK_NULL_HANDLE;
+    }
+
+    VkDeviceSize vertSize = snap.verts.size() * sizeof(Vertex);
+    createAndCopyBufferLocal(vertSize, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+        snap.verts.data(), snap.vertBuf, snap.vertMem);
+
+    VkDeviceSize idxSize = snap.inds.size() * sizeof(uint32_t);
+    createAndCopyBufferLocal(idxSize, VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
+        snap.inds.data(), snap.idxBuf, snap.idxMem);
+}
+
 void App::createAndCopyBuffer2(VkDeviceSize bufferSize, VkBufferUsageFlags flags, void* srcData, VkBuffer& dstBuffer, VkDeviceMemory& dstBufferMemory) {
     createBuffer(bufferSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT | flags, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, dstBuffer, dstBufferMemory);
 
