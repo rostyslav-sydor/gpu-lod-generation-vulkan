@@ -85,12 +85,14 @@ void main() {
     uint tid = gl_LocalInvocationID.x;
     uint gid = gl_GlobalInvocationID.x;
 
-    // --- Initialize shared map (all threads participate) ---
-    for (uint t = tid; t < SMAP_SIZE; t += WORKGROUP_SIZE)
-        smapKey[t] = NONE;
-    uint totalVals = SMAP_SIZE * uint(QUADRIC_FIELDS);
-    for (uint t = tid; t < totalVals; t += WORKGROUP_SIZE)
-        smapVal[t] = 0;
+    // --- Initialize shared map (all threads participate, skip for paper mode) ---
+    if (costMode != COST_MODE_PAPER) {
+        for (uint t = tid; t < SMAP_SIZE; t += WORKGROUP_SIZE)
+            smapKey[t] = NONE;
+        uint totalVals = SMAP_SIZE * uint(QUADRIC_FIELDS);
+        for (uint t = tid; t < totalVals; t += WORKGROUP_SIZE)
+            smapVal[t] = 0;
+    }
     barrier();
 
     // --- Load triangle, compute face quadric, accumulate in shared map ---
@@ -138,15 +140,17 @@ void main() {
         }
     }
 
-    // --- Flush shared map to global (all threads participate) ---
+    // --- Flush shared map to global (all threads participate, skip for paper mode) ---
     barrier();
-    for (uint t = tid; t < SMAP_SIZE; t += WORKGROUP_SIZE) {
-        if (smapKey[t] != NONE) {
-            uint vertIdx = smapKey[t];
-            uint gBase = vertIdx * uint(QUADRIC_FIELDS);
-            uint sBase = t * uint(QUADRIC_FIELDS);
-            for (int i = 0; i < QUADRIC_FIELDS; i++) {
-                atomicAdd(quadricsData[gBase + uint(i)], smapVal[sBase + uint(i)]);
+    if (costMode != COST_MODE_PAPER) {
+        for (uint t = tid; t < SMAP_SIZE; t += WORKGROUP_SIZE) {
+            if (smapKey[t] != NONE) {
+                uint vertIdx = smapKey[t];
+                uint gBase = vertIdx * uint(QUADRIC_FIELDS);
+                uint sBase = t * uint(QUADRIC_FIELDS);
+                for (int i = 0; i < QUADRIC_FIELDS; i++) {
+                    atomicAdd(quadricsData[gBase + uint(i)], smapVal[sBase + uint(i)]);
+                }
             }
         }
     }

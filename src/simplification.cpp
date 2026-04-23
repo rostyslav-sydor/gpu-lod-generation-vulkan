@@ -652,7 +652,7 @@ void App::printDecimationMetrics() {
         auto printDistRow = [&](const char* label, float gpuVal, float cpuVal, const char* fmt) {
             char buf[256];
             std::string line;
-            snprintf(buf, sizeof(buf), "  %-24s%12s", label, "—");
+            snprintf(buf, sizeof(buf), "  %-24s%12s", label, "—  ");
             line += buf;
             if (hasGPU) { snprintf(buf, sizeof(buf), fmt, gpuVal); line += buf; }
             if (hasCPU) { snprintf(buf, sizeof(buf), fmt, cpuVal); line += buf; }
