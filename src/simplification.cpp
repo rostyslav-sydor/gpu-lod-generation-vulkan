@@ -1734,6 +1734,66 @@ void App::stepInteractiveDecimation() {
     updateMeshBuffersForMode(RENDER_GPU);
 }
 
+void App::computeHeatMapColors() {
+    auto& snap = meshSnapshots[activeRenderMode];
+    if (!snap.valid || snap.verts.empty()) return;
+
+    size_t V = snap.verts.size();
+    size_t T = snap.inds.size() / 3;
+
+    savedNormals.resize(V);
+    for (size_t i = 0; i < V; i++)
+        savedNormals[i] = snap.verts[i].normal;
+
+    // Compute per-vertex angle sum for discrete curvature
+    std::vector<float> angleSum(V, 0.0f);
+    std::vector<uint32_t> valence(V, 0);
+
+    for (size_t t = 0; t < T; t++) {
+        uint32_t i0 = snap.inds[t*3+0], i1 = snap.inds[t*3+1], i2 = snap.inds[t*3+2];
+        if (i0 >= V || i1 >= V || i2 >= V) continue;
+        glm::vec3 p0 = snap.verts[i0].pos, p1 = snap.verts[i1].pos, p2 = snap.verts[i2].pos;
+
+        auto safeAngle = [](glm::vec3 a, glm::vec3 b) -> float {
+            float la = glm::length(a), lb = glm::length(b);
+            if (la < 1e-10f || lb < 1e-10f) return 0.0f;
+            return std::acos(glm::clamp(glm::dot(a, b) / (la * lb), -1.0f, 1.0f));
+        };
+
+        angleSum[i0] += safeAngle(p1 - p0, p2 - p0); valence[i0]++;
+        angleSum[i1] += safeAngle(p0 - p1, p2 - p1); valence[i1]++;
+        angleSum[i2] += safeAngle(p0 - p2, p1 - p2); valence[i2]++;
+    }
+
+    // Convert to curvature and find range
+    std::vector<float> curvature(V, 0.0f);
+    float maxCurv = 0.0f;
+    for (size_t i = 0; i < V; i++) {
+        if (valence[i] == 0) continue;
+        curvature[i] = std::abs(2.0f * 3.14159265f - angleSum[i]);
+        maxCurv = std::max(maxCurv, curvature[i]);
+    }
+    if (maxCurv < 1e-8f) maxCurv = 1.0f;
+
+    // Map to color: blue (flat, low cost) → green (medium) → red (sharp, high cost)
+    for (size_t i = 0; i < V; i++) {
+        float t = glm::clamp(curvature[i] / (maxCurv * 0.3f), 0.0f, 1.0f);
+        glm::vec3 color;
+        if (t < 0.5f) {
+            float s = t * 2.0f;
+            color = glm::mix(glm::vec3(0.1f, 0.2f, 0.9f), glm::vec3(0.1f, 0.9f, 0.2f), s);
+        } else {
+            float s = (t - 0.5f) * 2.0f;
+            color = glm::mix(glm::vec3(0.1f, 0.9f, 0.2f), glm::vec3(0.9f, 0.1f, 0.1f), s);
+        }
+        snap.verts[i].normal = color;
+    }
+
+    updateMeshBuffersForMode(activeRenderMode);
+    std::cout << "Heat map computed: max curvature = " << maxCurv
+              << ", vertices = " << V << std::endl;
+}
+
 void App::updateMeshBuffersForMode(RenderMode mode) {
     auto& snap = meshSnapshots[mode];
     if (!snap.valid || snap.verts.empty() || snap.inds.empty()) return;

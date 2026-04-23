@@ -553,10 +553,17 @@ void App::createGraphicsPipeline() {
     dynamicState.dynamicStateCount = static_cast<uint32_t>(dynamicStates.size());
     dynamicState.pDynamicStates = dynamicStates.data();
 
+    VkPushConstantRange fragPushConst{};
+    fragPushConst.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    fragPushConst.offset = 0;
+    fragPushConst.size = sizeof(uint32_t);
+
     VkPipelineLayoutCreateInfo pipelineLayoutInfo{};
     pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
     pipelineLayoutInfo.setLayoutCount = 1;
     pipelineLayoutInfo.pSetLayouts = &descriptorSetLayout;
+    pipelineLayoutInfo.pushConstantRangeCount = 1;
+    pipelineLayoutInfo.pPushConstantRanges = &fragPushConst;
 
     if (vkCreatePipelineLayout(device, &pipelineLayoutInfo, nullptr, &pipelineLayout) != VK_SUCCESS) {
         throw std::runtime_error("failed to create pipeline layout!");
@@ -888,6 +895,21 @@ void App::keyCallback(GLFWwindow* window, int key, int scancode, int action, int
             app->stepInteractiveDecimation();
         }
     }
+
+    if (key == GLFW_KEY_H) {
+        app->heatMapEnabled = !app->heatMapEnabled;
+        if (app->heatMapEnabled) {
+            app->computeHeatMapColors();
+        } else {
+            auto& snap = app->meshSnapshots[app->activeRenderMode];
+            if (!app->savedNormals.empty() && snap.valid) {
+                for (size_t i = 0; i < snap.verts.size() && i < app->savedNormals.size(); i++)
+                    snap.verts[i].normal = app->savedNormals[i];
+                app->updateMeshBuffersForMode(app->activeRenderMode);
+            }
+        }
+        std::cout << "Heat map: " << (app->heatMapEnabled ? "ON" : "OFF") << std::endl;
+    }
 }
 
 void App::mouseCallback(GLFWwindow* window, double xpos, double ypos) {
@@ -1182,6 +1204,9 @@ void App::recordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t imageIndex
     vkCmdBindIndexBuffer(commandBuffer, snap.idxBuf, 0, VK_INDEX_TYPE_UINT32);
 
     vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout, 0, 1, &descriptorSets[currentFrame], 0, nullptr);
+
+    uint32_t heatMapVal = heatMapEnabled ? 1u : 0u;
+    vkCmdPushConstants(commandBuffer, pipelineLayout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(uint32_t), &heatMapVal);
 
     vkCmdDrawIndexed(commandBuffer, static_cast<uint32_t>(snap.inds.size()), 1, 0, 0, 0);
 

@@ -289,6 +289,11 @@ private:
     uint32_t logFinalTriCount = 0;
     long long logCpuUs = 0;
 
+    // Heat map visualization
+    bool heatMapEnabled = false;
+    std::vector<glm::vec3> savedNormals;
+    void computeHeatMapColors();
+
     // Interactive decimation state
     bool interactiveDecimReady = false;
     uint32_t interactiveVertCount = 0;
