@@ -200,22 +200,11 @@ void main() {
         optPos = mid;
     }
     else {
-        Quadric q0 = loadQuadric(v0);
-        Quadric q1 = loadQuadric(v1);
-        float w0 = max(q0.q[10], 1e-6);
-        float w1 = max(q1.q[10], 1e-6);
-        float e0to1 = abs(quadric_evaluate(q0, vert1.pos)) / w0;
-        float e1to0 = abs(quadric_evaluate(q1, vert0.pos)) / w1;
-        if (e0to1 <= e1to0) {
-            cost = e0to1 * costPenalty;
-            optPos = vert1.pos;
-        } else {
-            cost = e1to0 * costPenalty;
-            optPos = vert0.pos;
-        }
+        cost = edgeLen * costPenalty;
+        optPos = mid;
     }
 
-    if (costMode != COST_MODE_PAPER && cost >= costThreshold) {
+    if (costMode == COST_MODE_QEM && cost >= costThreshold) {
         edgeCost[gid] = cost;
         edgeFlags[gid] = eFlags;
         return;

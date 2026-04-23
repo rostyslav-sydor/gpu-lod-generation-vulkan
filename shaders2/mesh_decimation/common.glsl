@@ -27,7 +27,7 @@
 // Cost function modes (matches DecimationPushConstants.costMode)
 #define COST_MODE_QEM       0u
 #define COST_MODE_PAPER     1u
-#define COST_MODE_MESHOPT   2u
+#define COST_MODE_EDGELEN   2u
 
 // Edge flags
 #define EDGE_ELIGIBLE       (1u << 0)

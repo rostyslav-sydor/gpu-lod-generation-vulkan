@@ -85,8 +85,8 @@ void main() {
     uint tid = gl_LocalInvocationID.x;
     uint gid = gl_GlobalInvocationID.x;
 
-    // --- Initialize shared map (all threads participate, skip for paper mode) ---
-    if (costMode != COST_MODE_PAPER) {
+    // --- Initialize shared map (all threads participate, skip for non-QEM modes) ---
+    if (costMode == COST_MODE_QEM) {
         for (uint t = tid; t < SMAP_SIZE; t += WORKGROUP_SIZE)
             smapKey[t] = NONE;
         uint totalVals = SMAP_SIZE * uint(QUADRIC_FIELDS);
@@ -127,7 +127,7 @@ void main() {
             float d = -dot(n, p0);
             plane = vec4(n, d);
 
-            if (costMode != COST_MODE_PAPER) {
+            if (costMode == COST_MODE_QEM) {
                 Quadric qr = quadric_from_plane(plane);
                 float weight = sqrt(area2 * 0.5);
                 for (int i = 0; i < 10; i++) qr.q[i] *= weight;
@@ -140,9 +140,9 @@ void main() {
         }
     }
 
-    // --- Flush shared map to global (all threads participate, skip for paper mode) ---
+    // --- Flush shared map to global (all threads participate, only for QEM) ---
     barrier();
-    if (costMode != COST_MODE_PAPER) {
+    if (costMode == COST_MODE_QEM) {
         for (uint t = tid; t < SMAP_SIZE; t += WORKGROUP_SIZE) {
             if (smapKey[t] != NONE) {
                 uint vertIdx = smapKey[t];
@@ -167,46 +167,13 @@ void main() {
     if (isEdgeBoundary(i0, i1, mask)) {
         atomicOr(vertexFlags[i0], FLAG_BOUNDARY);
         atomicOr(vertexFlags[i1], FLAG_BOUNDARY);
-        if (costMode == COST_MODE_MESHOPT) {
-            float ew = 10.0;
-            Quadric bq = quadric_from_triangle_edge(p0, p1, p2, ew);
-            Quadric fq = quadric_from_plane(plane);
-            float fw = sqrt(area2 * 0.5) * ew;
-            for (int i = 0; i < 10; i++) fq.q[i] *= fw;
-            fq.q[10] = 0.0;
-            bq = quadric_add(bq, fq);
-            atomicAddQuadric(i0, bq);
-            atomicAddQuadric(i1, bq);
-        }
     }
     if (isEdgeBoundary(i1, i2, mask)) {
         atomicOr(vertexFlags[i1], FLAG_BOUNDARY);
         atomicOr(vertexFlags[i2], FLAG_BOUNDARY);
-        if (costMode == COST_MODE_MESHOPT) {
-            float ew = 10.0;
-            Quadric bq = quadric_from_triangle_edge(p1, p2, p0, ew);
-            Quadric fq = quadric_from_plane(plane);
-            float fw = sqrt(area2 * 0.5) * ew;
-            for (int i = 0; i < 10; i++) fq.q[i] *= fw;
-            fq.q[10] = 0.0;
-            bq = quadric_add(bq, fq);
-            atomicAddQuadric(i1, bq);
-            atomicAddQuadric(i2, bq);
-        }
     }
     if (isEdgeBoundary(i2, i0, mask)) {
         atomicOr(vertexFlags[i2], FLAG_BOUNDARY);
         atomicOr(vertexFlags[i0], FLAG_BOUNDARY);
-        if (costMode == COST_MODE_MESHOPT) {
-            float ew = 10.0;
-            Quadric bq = quadric_from_triangle_edge(p2, p0, p1, ew);
-            Quadric fq = quadric_from_plane(plane);
-            float fw = sqrt(area2 * 0.5) * ew;
-            for (int i = 0; i < 10; i++) fq.q[i] *= fw;
-            fq.q[10] = 0.0;
-            bq = quadric_add(bq, fq);
-            atomicAddQuadric(i2, bq);
-            atomicAddQuadric(i0, bq);
-        }
     }
 }

@@ -777,7 +777,7 @@ void App::runDecimation() {
     auto np2 = [](uint32_t v) { v--; v|=v>>1; v|=v>>2; v|=v>>4; v|=v>>8; v|=v>>16; v++; return v; };
     uint32_t hashMapSize = np2(std::max(vertCount, maxEdges) * 2);
 
-    const char* modeNames[] = {"QEM", "Paper (curvature+length+valence)", "Meshopt-like (QEM+borders+reg)"};
+    const char* modeNames[] = {"QEM", "Curvature", "Edge length"};
     std::cout << "Decimation: " << vertCount << " vertices, " << triCount << " triangles, hashMap=" << hashMapSize
               << ", costMode=" << decimationCostMode << " (" << modeNames[std::min(decimationCostMode, 2u)] << ")"
               << ", rounds=" << decimationInnerRounds << std::endl;
@@ -1796,7 +1796,7 @@ void App::computeChangeMap() {
         else if (vertAffected[i])
             snap.verts[i].normal = glm::vec3(1.0f, 0.8f, 0.2f);  // yellow: neighbor moved
         else
-            snap.verts[i].normal = glm::vec3(0.15f, 0.15f, 0.3f); // dark blue: untouched
+            snap.verts[i].normal = glm::vec3(0.25f, 0.25f, 0.25f); // gray: untouched
     }
 
     updateMeshBuffersForMode(activeRenderMode);
