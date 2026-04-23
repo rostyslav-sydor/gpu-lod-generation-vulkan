@@ -1642,6 +1642,11 @@ void App::initInteractiveDecimation() {
 void App::stepInteractiveDecimation() {
     if (!interactiveDecimReady) return;
 
+    // Save positions before this step for change map
+    prevPositions.resize(vertices.size());
+    for (size_t i = 0; i < vertices.size(); i++)
+        prevPositions[i] = vertices[i].pos;
+
     const uint32_t WORKGROUP_SIZE = 256;
     uint32_t vertCount = interactiveVertCount;
     uint32_t triCount = interactiveTriCount;
@@ -1731,7 +1736,72 @@ void App::stepInteractiveDecimation() {
     meshSnapshots[RENDER_GPU].verts = vertices;
     meshSnapshots[RENDER_GPU].inds = indices;
     meshSnapshots[RENDER_GPU].valid = true;
-    updateMeshBuffersForMode(RENDER_GPU);
+
+    if (heatMapMode == 1) {
+        computeHeatMapColors();
+    } else if (heatMapMode == 2) {
+        computeChangeMap();
+    } else {
+        updateMeshBuffersForMode(RENDER_GPU);
+    }
+}
+
+void App::computeChangeMap() {
+    auto& snap = meshSnapshots[activeRenderMode];
+    if (!snap.valid || snap.verts.empty() || prevPositions.empty()) return;
+
+    size_t V = snap.verts.size();
+    size_t T = snap.inds.size() / 3;
+
+    savedNormals.resize(V);
+    for (size_t i = 0; i < V; i++)
+        savedNormals[i] = snap.verts[i].normal;
+
+    // Mark vertices that moved
+    std::vector<bool> changed(V, false);
+    size_t minV = std::min(V, prevPositions.size());
+    uint32_t changedCount = 0;
+    for (size_t i = 0; i < minV; i++) {
+        if (glm::length(snap.verts[i].pos - prevPositions[i]) > 1e-8f) {
+            changed[i] = true;
+            changedCount++;
+        }
+    }
+
+    // Mark triangles that touch a changed vertex
+    std::vector<bool> triAffected(T, false);
+    uint32_t affectedCount = 0;
+    for (size_t t = 0; t < T; t++) {
+        uint32_t i0 = snap.inds[t*3+0], i1 = snap.inds[t*3+1], i2 = snap.inds[t*3+2];
+        if (i0 >= V || i1 >= V || i2 >= V) continue;
+        if (changed[i0] || changed[i1] || changed[i2]) {
+            triAffected[t] = true;
+            affectedCount++;
+        }
+    }
+
+    // Color per vertex: affected = orange, untouched = dark blue
+    std::vector<uint32_t> vertAffected(V, 0);
+    for (size_t t = 0; t < T; t++) {
+        if (!triAffected[t]) continue;
+        uint32_t i0 = snap.inds[t*3+0], i1 = snap.inds[t*3+1], i2 = snap.inds[t*3+2];
+        if (i0 < V) vertAffected[i0] = 1;
+        if (i1 < V) vertAffected[i1] = 1;
+        if (i2 < V) vertAffected[i2] = 1;
+    }
+
+    for (size_t i = 0; i < V; i++) {
+        if (changed[i])
+            snap.verts[i].normal = glm::vec3(1.0f, 0.3f, 0.1f);  // orange: vertex moved
+        else if (vertAffected[i])
+            snap.verts[i].normal = glm::vec3(1.0f, 0.8f, 0.2f);  // yellow: neighbor moved
+        else
+            snap.verts[i].normal = glm::vec3(0.15f, 0.15f, 0.3f); // dark blue: untouched
+    }
+
+    updateMeshBuffersForMode(activeRenderMode);
+    std::cout << "Change map: " << changedCount << " vertices moved, "
+              << affectedCount << "/" << T << " triangles affected" << std::endl;
 }
 
 void App::computeHeatMapColors() {

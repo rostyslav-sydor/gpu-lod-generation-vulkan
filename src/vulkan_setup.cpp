@@ -897,18 +897,25 @@ void App::keyCallback(GLFWwindow* window, int key, int scancode, int action, int
     }
 
     if (key == GLFW_KEY_H) {
-        app->heatMapEnabled = !app->heatMapEnabled;
-        if (app->heatMapEnabled) {
-            app->computeHeatMapColors();
-        } else {
+        app->heatMapMode = (app->heatMapMode + 1) % 3;
+        const char* modeNames[] = {"OFF", "Curvature", "Change map"};
+
+        if (app->heatMapMode == 0) {
+            app->heatMapEnabled = false;
             auto& snap = app->meshSnapshots[app->activeRenderMode];
             if (!app->savedNormals.empty() && snap.valid) {
                 for (size_t i = 0; i < snap.verts.size() && i < app->savedNormals.size(); i++)
                     snap.verts[i].normal = app->savedNormals[i];
                 app->updateMeshBuffersForMode(app->activeRenderMode);
             }
+        } else if (app->heatMapMode == 1) {
+            app->heatMapEnabled = true;
+            app->computeHeatMapColors();
+        } else {
+            app->heatMapEnabled = true;
+            app->computeChangeMap();
         }
-        std::cout << "Heat map: " << (app->heatMapEnabled ? "ON" : "OFF") << std::endl;
+        std::cout << "Heat map: " << modeNames[app->heatMapMode] << std::endl;
     }
 }
 
