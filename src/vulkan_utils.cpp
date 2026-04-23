@@ -141,11 +141,6 @@ QueueFamilyIndices App::findQueueFamilies(VkPhysicalDevice device) {
         }
     }
 
-#ifdef WSL_COMPAT
-    if (!indices.computeFamily.has_value() && indices.graphicsFamily.has_value()) {
-        indices.computeFamily = indices.graphicsFamily;
-    }
-#endif
 
     return indices;
 }

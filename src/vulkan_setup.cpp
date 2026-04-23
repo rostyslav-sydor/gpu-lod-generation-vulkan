@@ -198,11 +198,7 @@ void App::createInstance() {
     appInfo.applicationVersion = VK_MAKE_VERSION(1, 0, 0);
     appInfo.pEngineName = "No Engine";
     appInfo.engineVersion = VK_MAKE_VERSION(1, 0, 0);
-#ifdef WSL_COMPAT
-    appInfo.apiVersion = VK_API_VERSION_1_1;
-#else
     appInfo.apiVersion = VK_API_VERSION_1_4;
-#endif
 
     VkInstanceCreateInfo createInfo{};
     createInfo.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
@@ -304,26 +300,8 @@ void App::createLogicalDevice() {
     createInfo.pNext = &features2;
     createInfo.pEnabledFeatures = nullptr;
 
-#ifdef WSL_COMPAT
-    std::vector<const char*> enabledExtensions(deviceExtensions.begin(), deviceExtensions.end());
-    uint32_t extCount;
-    vkEnumerateDeviceExtensionProperties(physicalDevice, nullptr, &extCount, nullptr);
-    std::vector<VkExtensionProperties> availableExts(extCount);
-    vkEnumerateDeviceExtensionProperties(physicalDevice, nullptr, &extCount, availableExts.data());
-    for (const char* optExt : optionalDeviceExtensions) {
-        for (const auto& available : availableExts) {
-            if (strcmp(optExt, available.extensionName) == 0) {
-                enabledExtensions.push_back(optExt);
-                break;
-            }
-        }
-    }
-    createInfo.enabledExtensionCount = static_cast<uint32_t>(enabledExtensions.size());
-    createInfo.ppEnabledExtensionNames = enabledExtensions.data();
-#else
     createInfo.enabledExtensionCount = static_cast<uint32_t>(deviceExtensions.size());
     createInfo.ppEnabledExtensionNames = deviceExtensions.data();
-#endif
 
     if (enableValidationLayers) {
         createInfo.enabledLayerCount = static_cast<uint32_t>(validationLayers.size());
