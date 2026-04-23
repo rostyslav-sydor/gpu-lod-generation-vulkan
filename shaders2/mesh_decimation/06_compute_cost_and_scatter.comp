@@ -186,7 +186,8 @@ void main() {
 
     if (costMode == COST_MODE_QEM) {
         Quadric qe = quadric_add(loadQuadric(v0), loadQuadric(v1));
-        cost = solveQEM(qe, vert0.pos, vert1.pos, optPos) * costPenalty;
+        float qemError = solveQEM(qe, vert0.pos, vert1.pos, optPos);
+        cost = (qemError + 0.5 * edgeLen * edgeLen) * costPenalty;
     }
     else if (costMode == COST_MODE_PAPER) {
         // Paper-style cost: edgeLength * (1 + curvatureWeight * maxCurvature)
