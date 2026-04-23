@@ -286,6 +286,19 @@ private:
 
     bool framebufferResized = false;
 
+    // Logging data saved by runDecimation for printDecimationMetrics
+    struct IterLogEntry {
+        uint32_t edges, collapses, triangles, eligible, compacted;
+        double gpu_ms;
+        double pass_ms[8];
+    };
+    std::vector<IterLogEntry> logIterData;
+    double logGpuMs = 0;
+    long long logTotalUs = 0;
+    uint32_t logOrigTriCount = 0;
+    uint32_t logFinalTriCount = 0;
+    long long logCpuUs = 0;
+
     // Interactive decimation state
     bool interactiveDecimReady = false;
     uint32_t interactiveVertCount = 0;

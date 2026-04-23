@@ -367,6 +367,7 @@ void App::runCPUDecimation() {
         if (len > 1e-8f) vertices[i].normal /= len;
     }
 
+    logCpuUs = elapsed;
     std::cout << "CPU Decimation (meshoptimizer): " << triCount << " -> " << newTriCount
               << " triangles (" << elapsed << " us)\n";
 }
@@ -650,6 +651,99 @@ void App::printDecimationMetrics() {
 
     if (hasGPU || hasCPU)
         std::cout << "  Keys: [G]PU  [C]PU  [O]riginal\n\n";
+
+    // ======================================================================
+    // Write CSV logs (only with DECIM_LOG=1)
+    // ======================================================================
+    if (decimationLogEnabled && hasGPU) {
+        std::string baseName = modelPath;
+        auto slash = baseName.find_last_of("/\\");
+        if (slash != std::string::npos) baseName = baseName.substr(slash + 1);
+
+        auto now = std::chrono::system_clock::now();
+        auto epoch = std::chrono::duration_cast<std::chrono::seconds>(now.time_since_epoch()).count();
+        std::string runId = std::to_string(epoch);
+
+        // --- decim_runs.csv ---
+        {
+            std::string path = "decim_runs.csv";
+            bool exists = std::ifstream(path).good();
+            std::ofstream csv(path, std::ios::app);
+            if (!exists) {
+                csv << "run_id,model,vertices,orig_triangles,"
+                       "target_ratio,cost_mode,cost_threshold,quant_bits,max_iterations,"
+                       "gpu_final_tris,gpu_ms,gpu_total_ms,"
+                       "gpu_hausdorff,gpu_avg_vert_dist,gpu_avg_normal_dev,"
+                       "gpu_min_angle,gpu_avg_min_angle,gpu_max_aspect,gpu_avg_aspect,"
+                       "cpu_final_tris,cpu_ms,"
+                       "cpu_hausdorff,cpu_avg_vert_dist,cpu_avg_normal_dev,"
+                       "cpu_min_angle,cpu_avg_min_angle,cpu_max_aspect,cpu_avg_aspect\n";
+            }
+
+            auto writeMetrics = [&](std::ofstream& f, const MeshMetrics& m) {
+                f << std::setprecision(6)
+                  << m.hausdorffDist << ","
+                  << m.avgVertDist << ","
+                  << m.avgNormalDevDeg << ","
+                  << m.minAngleDeg << ","
+                  << m.avgMinAngleDeg << ","
+                  << m.maxAspectRatio << ","
+                  << m.avgAspectRatio;
+            };
+
+            csv << runId << ","
+                << baseName << ","
+                << static_cast<uint32_t>(orig.verts.size()) << ","
+                << origTriCount << ","
+                << decimationTargetRatio << ","
+                << decimationCostMode << ","
+                << decimationCostThreshold << ","
+                << decimationCostQuantBits << ","
+                << maxDecimationIterations << ","
+                << std::fixed
+                << logFinalTriCount << ","
+                << std::setprecision(2) << logGpuMs << ","
+                << (logTotalUs / 1000) << ",";
+            writeMetrics(csv, gpuM);
+            csv << ",";
+            if (hasCPU) {
+                csv << cpuM.triCount << ","
+                    << std::setprecision(2) << (logCpuUs / 1000.0) << ",";
+                writeMetrics(csv, cpuM);
+            } else {
+                csv << ",,,,,,,,";
+            }
+            csv << std::defaultfloat << "\n";
+            csv.close();
+            std::cout << "Run summary -> decim_runs.csv (run " << runId << ")\n";
+        }
+
+        // --- decim_iterations.csv ---
+        {
+            std::string path = "decim_iterations.csv";
+            bool exists = std::ifstream(path).good();
+            std::ofstream csv(path, std::ios::app);
+            if (!exists) {
+                csv << "run_id,iteration,edges,eligible,collapses,tri_after,iter_gpu_ms,"
+                       "build_adj_ms,build_edges_ms,quadrics_ms,cost_scatter_ms,"
+                       "collapse_ms,mark_degen_ms,compact_ms,copyback_ms\n";
+            }
+            for (size_t i = 0; i < logIterData.size(); i++) {
+                csv << runId << ","
+                    << i << ","
+                    << logIterData[i].edges << ","
+                    << logIterData[i].eligible << ","
+                    << logIterData[i].collapses << ","
+                    << logIterData[i].triangles << ","
+                    << std::fixed << std::setprecision(4) << logIterData[i].gpu_ms;
+                for (int p = 0; p < 8; p++)
+                    csv << "," << std::setprecision(4) << logIterData[i].pass_ms[p];
+                csv << std::defaultfloat << "\n";
+            }
+            csv.close();
+            std::cout << "Per-iteration data -> decim_iterations.csv (" << logIterData.size() << " rows)\n";
+        }
+    }
 }
 
 // ============================================================================
@@ -1066,10 +1160,16 @@ void App::runDecimation() {
             avgPass[p] /= maxDecimationIterations;
             totalAvg += avgPass[p];
         }
-        std::cout << "  Per-pass avg (ms):";
-        for (int p = 0; p < 8; p++)
-            std::cout << "  " << passNames[p] << "=" << std::fixed << std::setprecision(3) << avgPass[p];
-        std::cout << "  total=" << std::setprecision(3) << totalAvg << std::defaultfloat << std::endl;
+        std::cout << "  Per-pass avg breakdown:\n";
+        for (int p = 0; p < 8; p++) {
+            double pct = (totalAvg > 0) ? (avgPass[p] / totalAvg * 100.0) : 0.0;
+            std::cout << "    " << std::setw(14) << std::left << passNames[p]
+                      << std::right << std::fixed << std::setprecision(3) << std::setw(8) << avgPass[p] << " ms"
+                      << "  (" << std::setprecision(1) << std::setw(5) << pct << "%)\n";
+        }
+        std::cout << "    " << std::setw(14) << std::left << "TOTAL"
+                  << std::right << std::setprecision(3) << std::setw(8) << totalAvg << " ms\n"
+                  << std::defaultfloat;
     }
 
     uint32_t lastEligible = readCounter(3);
@@ -1195,87 +1295,22 @@ void App::runDecimation() {
     }
     std::cout << "Position range of referenced verts: [" << minP << ", " << maxP << "]" << std::endl;
 
-    // ======================================================================
-    // Write CSV logs (only with DECIM_LOG=1)
-    // ======================================================================
+    // Save logging data for printDecimationMetrics to write CSVs
     if (decimationLogEnabled) {
-        std::string baseName = modelPath;
-        auto slash = baseName.find_last_of("/\\");
-        if (slash != std::string::npos) baseName = baseName.substr(slash + 1);
-
-        // Generate a run ID from timestamp
-        auto now = std::chrono::system_clock::now();
-        auto epoch = std::chrono::duration_cast<std::chrono::seconds>(now.time_since_epoch()).count();
-        std::string runId = std::to_string(epoch);
-
-        // --- decim_runs.csv: one row per run ---
-        {
-            std::string path = "decim_runs.csv";
-            bool exists = std::ifstream(path).good();
-            std::ofstream csv(path, std::ios::app);
-            if (!exists) {
-                csv << "run_id,model,vertices,orig_triangles,final_triangles,"
-                       "target_ratio,cost_mode,cost_threshold,quant_bits,max_iterations,"
-                       "gpu_ms,total_ms,"
-                       "hausdorff,avg_vert_dist,avg_normal_dev,"
-                       "min_angle,avg_min_angle,max_aspect,avg_aspect\n";
-            }
-
-            auto& origSnap = meshSnapshots[RENDER_ORIGINAL];
-            auto gpuM = computeMetrics(vertices, indices,
-                static_cast<uint32_t>(origSnap.inds.size() / 3),
-                &origSnap.verts, &origSnap.inds);
-
-            csv << runId << ","
-                << baseName << ","
-                << vertCount << ","
-                << originalTriCount << ","
-                << triCount << ","
-                << decimationTargetRatio << ","
-                << decimationCostMode << ","
-                << decimationCostThreshold << ","
-                << decimationCostQuantBits << ","
-                << maxDecimationIterations << ","
-                << std::fixed << std::setprecision(2) << totalGpuMs << ","
-                << (totalUs / 1000) << ","
-                << std::setprecision(6)
-                << gpuM.hausdorffDist << ","
-                << gpuM.avgVertDist << ","
-                << gpuM.avgNormalDevDeg << ","
-                << gpuM.minAngleDeg << ","
-                << gpuM.avgMinAngleDeg << ","
-                << gpuM.maxAspectRatio << ","
-                << gpuM.avgAspectRatio
-                << std::defaultfloat << "\n";
-            csv.close();
-            std::cout << "Run summary -> decim_runs.csv (run " << runId << ")\n";
+        logIterData.resize(iterData.size());
+        for (size_t i = 0; i < iterData.size(); i++) {
+            logIterData[i].edges     = iterData[i].edges;
+            logIterData[i].collapses = iterData[i].collapses;
+            logIterData[i].triangles = iterData[i].triangles;
+            logIterData[i].eligible  = iterData[i].eligible;
+            logIterData[i].compacted = iterData[i].compacted;
+            logIterData[i].gpu_ms    = iterData[i].gpu_ms;
+            for (int p = 0; p < 8; p++) logIterData[i].pass_ms[p] = iterData[i].pass_ms[p];
         }
-
-        // --- decim_iterations.csv: one row per iteration ---
-        {
-            std::string path = "decim_iterations.csv";
-            bool exists = std::ifstream(path).good();
-            std::ofstream csv(path, std::ios::app);
-            if (!exists) {
-                csv << "run_id,iteration,edges,eligible,collapses,tri_after,iter_gpu_ms,"
-                       "build_adj_ms,build_edges_ms,quadrics_ms,cost_scatter_ms,"
-                       "collapse_ms,mark_degen_ms,compact_ms,copyback_ms\n";
-            }
-            for (uint32_t i = 0; i < iterData.size(); i++) {
-                csv << runId << ","
-                    << i << ","
-                    << iterData[i].edges << ","
-                    << iterData[i].eligible << ","
-                    << iterData[i].collapses << ","
-                    << iterData[i].triangles << ","
-                    << std::fixed << std::setprecision(4) << iterData[i].gpu_ms;
-                for (int p = 0; p < 8; p++)
-                    csv << "," << std::setprecision(4) << iterData[i].pass_ms[p];
-                csv << std::defaultfloat << "\n";
-            }
-            csv.close();
-            std::cout << "Per-iteration data -> decim_iterations.csv (" << iterData.size() << " rows)\n";
-        }
+        logGpuMs = totalGpuMs;
+        logTotalUs = totalUs;
+        logOrigTriCount = originalTriCount;
+        logFinalTriCount = triCount;
     }
 }
 

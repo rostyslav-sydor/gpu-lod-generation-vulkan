@@ -37,6 +37,37 @@ uint countAdjacent(uint vertIdx) {
     return count;
 }
 
+// Discrete Gaussian curvature via angle deficit: 2π - Σ(interior angles at v)
+float vertexCurvature(uint vertIdx) {
+    float angleSum = 0.0;
+    vec3 vPos = loadVertex(vertIdx).pos;
+    uint idx = adjHead[vertIdx];
+    while (idx != NONE) {
+        uint triIdx = idx / 3u;
+        uint i0 = posIndices[triIdx * 3u + 0u];
+        uint i1 = posIndices[triIdx * 3u + 1u];
+        uint i2 = posIndices[triIdx * 3u + 2u];
+
+        vec3 a, b;
+        if      (i0 == vertIdx) { a = loadVertex(i1).pos - vPos; b = loadVertex(i2).pos - vPos; }
+        else if (i1 == vertIdx) { a = loadVertex(i0).pos - vPos; b = loadVertex(i2).pos - vPos; }
+        else                    { a = loadVertex(i0).pos - vPos; b = loadVertex(i1).pos - vPos; }
+
+        float lenA = length(a);
+        float lenB = length(b);
+        if (lenA > 1e-10 && lenB > 1e-10)
+            angleSum += acos(clamp(dot(a, b) / (lenA * lenB), -1.0, 1.0));
+
+        idx = triAdjNext[idx];
+    }
+
+    bool isBoundary = (vertexFlags[vertIdx] & FLAG_BOUNDARY) != 0u;
+    if (isBoundary)
+        return abs(3.14159265 - angleSum);
+    else
+        return abs(6.28318530 - angleSum);
+}
+
 bool checkFlips(uint vertIdx, vec3 oldPos, uint otherVert, vec3 newPos) {
     uint idx = adjHead[vertIdx];
     while (idx != NONE) {
@@ -150,21 +181,22 @@ void main() {
         cost = solveQEM(qe, vert0.pos, vert1.pos, optPos) * costPenalty;
     }
     else if (costMode == COST_MODE_PAPER) {
-        float dihedralCost = 1.0;
-        if (eTri0 != NONE && eTri1 != NONE) {
-            vec3 n0 = getTriNormal(eTri0);
-            vec3 n1 = getTriNormal(eTri1);
-            float len0 = length(n0);
-            float len1 = length(n1);
-            if (len0 > 1e-12 && len1 > 1e-12) {
-                float cosA = dot(n0, n1) / (len0 * len1);
-                dihedralCost = 1.0 - clamp(cosA, -1.0, 1.0);
-            }
+        // Paper-style cost: edgeLength * (1 + curvatureWeight * maxCurvature)
+        float curv0 = vertexCurvature(v0);
+        float curv1 = vertexCurvature(v1);
+        float maxCurv = max(curv0, curv1);
+
+        const float curvatureWeight = 10.0;
+        cost = edgeLen * (1.0 + curvatureWeight * maxCurv) * costPenalty;
+
+        // Hard topology guards (matching reference implementation)
+        uint mergedValence = valence0 + valence1 - 4u;
+        if (mergedValence > 20u || mergedValence <= 3u) {
+            edgeCost[gid] = 1e30;
+            edgeFlags[gid] = eFlags;
+            return;
         }
-        float idealValence = 6.0;
-        float mergedValence = float(valence0 + valence1) - 2.0;
-        float valenceDev = abs(mergedValence - idealValence) / idealValence;
-        cost = dihedralCost * edgeLen * (1.0 + valenceDev) * costPenalty;
+
         optPos = mid;
     }
     else {
@@ -183,7 +215,7 @@ void main() {
         }
     }
 
-    if (costMode != COST_MODE_PAPER && cost >= costThreshold) {
+    if (cost >= costThreshold) {
         edgeCost[gid] = cost;
         edgeFlags[gid] = eFlags;
         return;
