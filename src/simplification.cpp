@@ -413,9 +413,10 @@ static float pointToTriDist(glm::vec3 p, glm::vec3 a, glm::vec3 b, glm::vec3 c) 
 }
 
 static float triAngle(glm::vec3 a, glm::vec3 b, glm::vec3 c) {
-    glm::vec3 ab = glm::normalize(b - a);
-    glm::vec3 ac = glm::normalize(c - a);
-    return glm::degrees(std::acos(glm::clamp(glm::dot(ab, ac), -1.0f, 1.0f)));
+    glm::vec3 ab = b - a, ac = c - a;
+    float labac = glm::length(ab) * glm::length(ac);
+    if (labac < 1e-12f) return 0.0f;
+    return glm::degrees(std::acos(glm::clamp(glm::dot(ab, ac) / labac, -1.0f, 1.0f)));
 }
 
 static float triAspectRatio(glm::vec3 a, glm::vec3 b, glm::vec3 c) {
@@ -527,6 +528,7 @@ static MeshMetrics computeMetrics(
     m.reductionRatio = (originalTriCount > 0) ? (float)m.triCount / originalTriCount : 1.0f;
 
     float sumMinAngle = 0.0f, sumAspect = 0.0f;
+    uint32_t validTris = 0;
     m.minAngleDeg = 180.0f;
     m.maxAspectRatio = 0.0f;
 
@@ -534,6 +536,9 @@ static MeshMetrics computeMetrics(
         uint32_t i0 = inds[t*3+0], i1 = inds[t*3+1], i2 = inds[t*3+2];
         if (i0 >= verts.size() || i1 >= verts.size() || i2 >= verts.size()) continue;
         glm::vec3 a = verts[i0].pos, b = verts[i1].pos, c = verts[i2].pos;
+
+        float area = glm::length(glm::cross(b - a, c - a));
+        if (area < 1e-12f) continue;
 
         float a0 = triAngle(a, b, c);
         float a1 = triAngle(b, c, a);
@@ -545,10 +550,11 @@ static MeshMetrics computeMetrics(
         float ar = triAspectRatio(a, b, c);
         m.maxAspectRatio = std::max(m.maxAspectRatio, ar);
         sumAspect += ar;
+        validTris++;
     }
-    if (m.triCount > 0) {
-        m.avgMinAngleDeg = sumMinAngle / m.triCount;
-        m.avgAspectRatio = sumAspect / m.triCount;
+    if (validTris > 0) {
+        m.avgMinAngleDeg = sumMinAngle / validTris;
+        m.avgAspectRatio = sumAspect / validTris;
     }
 
     if (origVerts && origInds && !origInds->empty()) {
@@ -643,9 +649,18 @@ void App::printDecimationMetrics() {
     printRow("Max aspect ratio", origM.maxAspectRatio,  gpuM.maxAspectRatio,  cpuM.maxAspectRatio,  "%12.2f");
     printRow("Avg aspect ratio", origM.avgAspectRatio,  gpuM.avgAspectRatio,  cpuM.avgAspectRatio,  "%12.2f");
     if (hasGPU || hasCPU) {
-        printRow("Hausdorff dist",   0.0f,                  gpuM.hausdorffDist,   cpuM.hausdorffDist,   "%12.4f");
-        printRow("Avg vertex dist",  0.0f,                  gpuM.avgVertDist,     cpuM.avgVertDist,     "%12.4f");
-        printRow("Avg normal dev",   0.0f,                  gpuM.avgNormalDevDeg, cpuM.avgNormalDevDeg, "%12.2f");
+        auto printDistRow = [&](const char* label, float gpuVal, float cpuVal, const char* fmt) {
+            char buf[256];
+            std::string line;
+            snprintf(buf, sizeof(buf), "  %-24s%12s", label, "—");
+            line += buf;
+            if (hasGPU) { snprintf(buf, sizeof(buf), fmt, gpuVal); line += buf; }
+            if (hasCPU) { snprintf(buf, sizeof(buf), fmt, cpuVal); line += buf; }
+            std::cout << line << "\n";
+        };
+        printDistRow("Hausdorff dist",  gpuM.hausdorffDist,   cpuM.hausdorffDist,   "%12.4f");
+        printDistRow("Avg vertex dist", gpuM.avgVertDist,     cpuM.avgVertDist,     "%12.4f");
+        printDistRow("Avg normal dev",  gpuM.avgNormalDevDeg, cpuM.avgNormalDevDeg, "%12.2f");
     }
     std::cout << "\n";
 
