@@ -167,13 +167,31 @@ void main() {
     if (isEdgeBoundary(i0, i1, mask)) {
         atomicOr(vertexFlags[i0], FLAG_BOUNDARY);
         atomicOr(vertexFlags[i1], FLAG_BOUNDARY);
+        if (costMode == COST_MODE_QEM) {
+            float ew = 10.0;
+            Quadric bq = quadric_from_triangle_edge(p0, p1, p2, ew);
+            atomicAddQuadric(i0, bq);
+            atomicAddQuadric(i1, bq);
+        }
     }
     if (isEdgeBoundary(i1, i2, mask)) {
         atomicOr(vertexFlags[i1], FLAG_BOUNDARY);
         atomicOr(vertexFlags[i2], FLAG_BOUNDARY);
+        if (costMode == COST_MODE_QEM) {
+            float ew = 10.0;
+            Quadric bq = quadric_from_triangle_edge(p1, p2, p0, ew);
+            atomicAddQuadric(i1, bq);
+            atomicAddQuadric(i2, bq);
+        }
     }
     if (isEdgeBoundary(i2, i0, mask)) {
         atomicOr(vertexFlags[i2], FLAG_BOUNDARY);
         atomicOr(vertexFlags[i0], FLAG_BOUNDARY);
+        if (costMode == COST_MODE_QEM) {
+            float ew = 10.0;
+            Quadric bq = quadric_from_triangle_edge(p2, p0, p1, ew);
+            atomicAddQuadric(i2, bq);
+            atomicAddQuadric(i0, bq);
+        }
     }
 }

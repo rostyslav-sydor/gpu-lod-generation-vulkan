@@ -85,7 +85,14 @@ bool checkFlips(uint vertIdx, vec3 oldPos, uint otherVert, vec3 newPos) {
             vec3 oldN = cross(pa - oldPos,  pb - oldPos);
             vec3 newN = cross(pa - newPos,  pb - newPos);
 
-            if (dot(oldN, newN) <= 0.25 * sqrt(dot(oldN, oldN) * dot(newN, newN))) return false;
+            float oldArea2 = dot(oldN, oldN);
+            float newArea2 = dot(newN, newN);
+
+            // Reject if normal flips or changes by more than ~60°
+            if (dot(oldN, newN) <= 0.5 * sqrt(oldArea2 * newArea2)) return false;
+
+            // Reject if triangle area shrinks to <5% of original (near-degenerate)
+            if (newArea2 < 0.05 * oldArea2) return false;
         }
         idx = triAdjNext[idx];
     }
@@ -153,7 +160,8 @@ void main() {
 
     uint valence0 = countAdjacent(v0);
     uint valence1 = countAdjacent(v1);
-    if ((valence0 + valence1) > 24u) {
+    int mergedValence = int(valence0) + int(valence1) - 4;
+    if (mergedValence > 20 || mergedValence <= 3) {
         edgeCost[gid] = 1e30;
         edgeFlags[gid] = eFlags;
         return;
@@ -188,15 +196,6 @@ void main() {
 
         const float curvatureWeight = 10.0;
         cost = edgeLen * (1.0 + curvatureWeight * maxCurv) * costPenalty;
-
-        // Hard topology guards (matching reference implementation)
-        int mergedValence = int(valence0) + int(valence1) - 4;
-        if (mergedValence > 20 || mergedValence <= 3) {
-            edgeCost[gid] = 1e30;
-            edgeFlags[gid] = eFlags;
-            return;
-        }
-
         optPos = mid;
     }
     else {
