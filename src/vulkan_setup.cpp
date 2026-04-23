@@ -814,7 +814,7 @@ void App::createIndexBuffer() {
 }
 
 void App::createMeshBuffers() {
-    const size_t MAX_RENDER_TRIS = 500000;
+    const size_t MAX_RENDER_TRIS = 2000000;
     for (int i = 0; i < RENDER_MODE_COUNT; i++) {
         auto& snap = meshSnapshots[i];
         if (!snap.valid || snap.verts.empty() || snap.inds.empty()) continue;

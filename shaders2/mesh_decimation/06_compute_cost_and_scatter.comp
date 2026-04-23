@@ -190,8 +190,8 @@ void main() {
         cost = edgeLen * (1.0 + curvatureWeight * maxCurv) * costPenalty;
 
         // Hard topology guards (matching reference implementation)
-        uint mergedValence = valence0 + valence1 - 4u;
-        if (mergedValence > 20u || mergedValence <= 3u) {
+        int mergedValence = int(valence0) + int(valence1) - 4;
+        if (mergedValence > 20 || mergedValence <= 3) {
             edgeCost[gid] = 1e30;
             edgeFlags[gid] = eFlags;
             return;
@@ -215,7 +215,7 @@ void main() {
         }
     }
 
-    if (cost >= costThreshold) {
+    if (costMode != COST_MODE_PAPER && cost >= costThreshold) {
         edgeCost[gid] = cost;
         edgeFlags[gid] = eFlags;
         return;
