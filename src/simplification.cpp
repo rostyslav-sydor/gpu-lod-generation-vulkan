@@ -1100,7 +1100,24 @@ void App::runDecimation() {
                 dispatchPass(cmd, passes[p].pipeIdx, pc, passes[p].wgs);
                 computeBarrier(cmd);
                 submitAndWait(cmd);
-                std::cerr << " ok\n";
+                std::cerr << " ok";
+
+                // Dump counters after each pass
+                if (decimationUseDeviceLocal) {
+                    cmd = beginCmd();
+                    VkBufferCopy rgn{}; rgn.size = 5 * sizeof(uint32_t);
+                    vkCmdCopyBuffer(cmd, decimationBufs[DB_COUNTER], counterReadbackBuf, 1, &rgn);
+                    VkMemoryBarrier mb{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+                    mb.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+                    mb.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+                    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                        VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &mb, 0, nullptr, 0, nullptr);
+                    submitAndWait(cmd);
+                    auto* c = static_cast<uint32_t*>(counterReadbackMapped);
+                    std::cerr << " [edges=" << c[0] << " collapse=" << c[1]
+                              << " tris=" << c[2] << " elig=" << c[3] << " compact=" << c[4] << "]";
+                }
+                std::cerr << "\n";
             }
 
             if (!isLight) {

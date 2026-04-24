@@ -136,6 +136,9 @@ void main() {
     uint actualEdgeCount = counters[COUNTER_EDGE_COUNT];
     if (gid >= actualEdgeCount) return;
 
+    // BISECT: move this return down to find what hangs. Remove when done.
+    return;
+
     if (counters[COUNTER_TRIANGLE_COUNT] <= targetTriCount) return;
 
     uvec2 edge = edges[gid];
