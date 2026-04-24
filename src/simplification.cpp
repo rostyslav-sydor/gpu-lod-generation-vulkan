@@ -1098,6 +1098,8 @@ void App::runDecimation() {
             tsWrite(8);
             dispatchPass(cmd, 10, pc, triDispatchWGs);   // P12: copyback
             computeBarrier(cmd);
+            // Reset aliveFlags after compaction (triangle indices were renumbered)
+            vkCmdFillBuffer(cmd, decimationBufs[DB_ALIVE], 0, decimationBufSizes[DB_ALIVE], 1);
             tsWrite(9);
         } else {
             tsWrite(8);
@@ -1768,6 +1770,8 @@ void App::stepInteractiveDecimation() {
         computeBarrier();
         dispatchPass(10, pc, triDispatchWGs);   // copyback
         computeBarrier();
+        // Reset aliveFlags after compaction (triangle indices were renumbered)
+        vkCmdFillBuffer(computeCommandBuffer, decimationBufs[DB_ALIVE], 0, decimationBufSizes[DB_ALIVE], 1);
     }
 
     vkEndCommandBuffer(computeCommandBuffer);
