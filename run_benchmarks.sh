@@ -33,11 +33,8 @@ ARMADILLO="Armadillo.ply"
 BUDDHA="happy_recon/happy_vrip.ply"
 GLYKON="Glykon.obj"
 
-# ALL_MODELS=("$BUNNY" "$ARMADILLO" "$BUDDHA" "$GLYKON")
-# MODEL_NAMES=("bunny" "armadillo" "buddha" "glykon")
-
-ALL_MODELS=("$BUNNY" "$ARMADILLO" "$BUDDHA")
-MODEL_NAMES=("bunny" "armadillo" "buddha")
+ALL_MODELS=("$BUNNY" "$ARMADILLO" "$BUDDHA" "$GLYKON")
+MODEL_NAMES=("bunny" "armadillo" "buddha" "glykon")
 
 
 run() {

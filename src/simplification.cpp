@@ -686,7 +686,7 @@ void App::printDecimationMetrics() {
             std::ofstream csv(path, std::ios::app);
             if (!exists) {
                 csv << "run_id,model,vertices,orig_triangles,"
-                       "target_ratio,cost_mode,cost_threshold,quant_bits,max_iterations,"
+                       "target_ratio,cost_mode,cost_threshold,quant_bits,max_iterations,full_rebuild_freq,"
                        "gpu_final_tris,gpu_ms,gpu_total_ms,"
                        "gpu_hausdorff,gpu_avg_vert_dist,gpu_avg_normal_dev,"
                        "gpu_min_angle,gpu_avg_min_angle,gpu_max_aspect,gpu_avg_aspect,"
@@ -715,6 +715,7 @@ void App::printDecimationMetrics() {
                 << decimationCostThreshold << ","
                 << decimationCostQuantBits << ","
                 << maxDecimationIterations << ","
+                << decimationFullRebuildFreq << ","
                 << std::fixed
                 << logFinalTriCount << ","
                 << std::setprecision(2) << logGpuMs << ","
