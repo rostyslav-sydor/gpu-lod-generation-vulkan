@@ -141,6 +141,6 @@ void main() {
 
     // --- Initialize triangle descriptor for atomic-min scatter (fused P7) ---
     if (gid < actualTriCount) {
-        triDescriptor[gid] = 0xFFFFFFFFu;
+        triDescriptor[gid] = 0xFFFFFFFFFFFFFFFFul;
     }
 }

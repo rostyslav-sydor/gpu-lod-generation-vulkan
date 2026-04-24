@@ -32,7 +32,7 @@
 
 layout(local_size_x = WORKGROUP_SIZE) in;
 
-void updateVertex(uint vertIdx, uint descriptor) {
+void updateVertex(uint vertIdx, uint64_t descriptor) {
     uint idx = adjHead[vertIdx];
     while (idx != NONE) {
         uint triIdx = idx / 3u;
@@ -52,7 +52,8 @@ void main() {
     if (((vertexFlags[edge.x] | vertexFlags[edge.y]) & FLAG_COLLAPSED) != 0u) return;
 
     float cost = edgeCost[gid];
-    uint descriptor = quantizeCostBits(cost, costQuantBits) | gid;
+    uint costBits = quantizeCostBits(cost, costQuantBits);
+    uint64_t descriptor = (uint64_t(costBits) << 32) | uint64_t(gid);
 
     updateVertex(edge.x, descriptor);
     updateVertex(edge.y, descriptor);

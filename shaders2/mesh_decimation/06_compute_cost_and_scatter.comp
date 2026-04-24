@@ -1,4 +1,5 @@
 #version 460
+#extension GL_EXT_shader_atomic_int64 : require
 
 // ============================================================================
 // Pass 6 (fused): Compute Edge Cost + Scatter to Triangle Descriptors
@@ -121,11 +122,17 @@ vec3 getTriNormal(uint triIdx) {
     return cross(b - a, c - a);
 }
 
-void scatterToAdjacentTris(uint vertIdx, uint descriptor) {
+void scatterToAdjacentTris(uint vertIdx, uint64_t descriptor) {
     uint idx = adjHead[vertIdx];
     while (idx != NONE) {
         uint triIdx = idx / 3u;
-        atomicMin(triDescriptor[triIdx], descriptor);
+        // CAS loop implementing atomicMin(uint64_t) — avoids driver bug with native atomicMin
+        uint64_t old = triDescriptor[triIdx];
+        while (descriptor < old) {
+            uint64_t prev = atomicCompSwap(triDescriptor[triIdx], old, descriptor);
+            if (prev == old) break;
+            old = prev;
+        }
         idx = triAdjNext[idx];
     }
 }
@@ -152,7 +159,8 @@ void main() {
                 edgeFlags[gid] = 0u;
                 return;
             }
-            uint descriptor = quantizeCostBits(prevCost, costQuantBits) | gid;
+            uint costBits = quantizeCostBits(prevCost, costQuantBits);
+            uint64_t descriptor = (uint64_t(costBits) << 32) | uint64_t(gid);
             scatterToAdjacentTris(v0, descriptor);
             scatterToAdjacentTris(v1, descriptor);
             return;
@@ -236,7 +244,8 @@ void main() {
     // --- Fused scatter: atomicMin to all adjacent triangles of both endpoints ---
     if (((flags0 | flags1) & FLAG_COLLAPSED) != 0u) return;
 
-    uint descriptor = quantizeCostBits(cost, costQuantBits) | gid;
+    uint costBits = quantizeCostBits(cost, costQuantBits);
+    uint64_t descriptor = (uint64_t(costBits) << 32) | uint64_t(gid);
 
     scatterToAdjacentTris(v0, descriptor);
     scatterToAdjacentTris(v1, descriptor);
