@@ -22,7 +22,7 @@ recomp_shaders:
 	glslc -fshader-stage=frag $(SHADER_DBG_FLAGS) shaders/fragment.glsl -o shaders/frag.spv
 
 $(DECIMATION_DIR)/%.spv: $(DECIMATION_DIR)/%.comp $(DECIMATION_DIR)/common.glsl $(DECIMATION_DIR)/bindings.glsl
-	glslc -fshader-stage=comp --target-env=vulkan1.1 -I $(DECIMATION_DIR) $(SHADER_DBG_FLAGS) $< -o $@
+	glslc -fshader-stage=comp --target-env=vulkan1.4 -I $(DECIMATION_DIR) $(SHADER_DBG_FLAGS) $< -o $@
 
 recomp_decimation_shaders: $(DECIMATION_SPVS)
 

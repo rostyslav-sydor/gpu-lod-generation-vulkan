@@ -85,8 +85,6 @@ void main() {
     uint tid = gl_LocalInvocationID.x;
     uint gid = gl_GlobalInvocationID.x;
 
-    // --- Quadric accumulation: only on iteration 0 (subsequent iterations use cached quadrics
-    //     merged incrementally in Pass 9). ---
     bool fullQuadricBuild = (costMode == COST_MODE_QEM && iteration == 0u);
 
     if (fullQuadricBuild) {

@@ -97,7 +97,7 @@ void main() {
     // Replace v1 with v0 in all adjacent triangles of v1
     replaceInAdjacent(v1, v0);
 
-    // Merge v1's quadric into v0 (incremental QEM — avoids full rebuild next iteration)
+    // Merge v1's quadric into v0 for next iteration's cached quadrics
     if (costMode == COST_MODE_QEM) {
         uint baseV0 = v0 * uint(QUADRIC_FIELDS);
         uint baseV1 = v1 * uint(QUADRIC_FIELDS);

@@ -1036,8 +1036,6 @@ void App::runDecimation() {
         vkCmdFillBuffer(cmd, decimationBufs[DB_COUNTER], 12, 8, 0);
         vkCmdFillBuffer(cmd, decimationBufs[DB_ADJ_HEAD], 0, decimationBufSizes[DB_ADJ_HEAD], 0xFFFFFFFF);
         vkCmdFillBuffer(cmd, decimationBufs[DB_HASHMAP_EDGE], 0, edgeHashMapSize, 0xFFFFFFFF);
-        // Quadrics: only clear on iteration 0. Subsequent iterations use cached quadrics
-        // merged incrementally in Pass 9 (standard Garland-Heckbert accumulation).
         if (iteration == 0)
             vkCmdFillBuffer(cmd, decimationBufs[DB_QUADRIC], 0, decimationBufSizes[DB_QUADRIC], 0);
         transferToComputeBarrier(cmd);

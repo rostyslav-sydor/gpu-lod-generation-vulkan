@@ -186,7 +186,16 @@ void main() {
 
     if (costMode == COST_MODE_QEM) {
         Quadric qe = quadric_add(loadQuadric(v0), loadQuadric(v1));
-        cost = solveQEM(qe, vert0.pos, vert1.pos, optPos) * costPenalty;
+        float w = max(qe.q[10], 1e-6);
+        float c0 = abs(quadric_evaluate(qe, vert0.pos)) / w;
+        float c1 = abs(quadric_evaluate(qe, vert1.pos)) / w;
+        if (c0 <= c1) {
+            cost = c0 * costPenalty;
+            optPos = vert0.pos;
+        } else {
+            cost = c1 * costPenalty;
+            optPos = vert1.pos;
+        }
     }
     else if (costMode == COST_MODE_PAPER) {
         // Paper-style cost: edgeLength * (1 + curvatureWeight * maxCurvature)
@@ -201,12 +210,6 @@ void main() {
     else {
         cost = edgeLen * costPenalty;
         optPos = mid;
-    }
-
-    if (costMode == COST_MODE_QEM && cost >= costThreshold) {
-        edgeCost[gid] = cost;
-        edgeFlags[gid] = eFlags;
-        return;
     }
 
     if (!checkFlips(v0, vert0.pos, v1, optPos) ||
