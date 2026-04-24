@@ -142,14 +142,12 @@ void main() {
     uint v0 = edge.x;
     uint v1 = edge.y;
 
-    // Light iterations: skip clean edges, re-scatter 2-ring edges
+    // Light iterations: only recompute cost for 1-ring dirty edges (topology changed).
+    // All other edges re-scatter their cached cost — cheap but keeps triDescriptor
+    // fully populated so the pass 9 independent-set check sees no stale gaps.
     if (lightIteration != 0u) {
         bool dirty1 = (posMap[v0] == iteration) || (posMap[v1] == iteration);
-        uint ring2 = iteration | 0x80000000u;
-        bool dirty2 = (posMap[v0] == ring2) || (posMap[v1] == ring2);
-        if (!dirty1 && !dirty2) return;
-        if (!dirty1 && dirty2) {
-            // 2-ring: re-scatter old descriptor without recomputing cost
+        if (!dirty1) {
             float prevCost = edgeCost[gid];
             if (prevCost >= 1e30 || (edgeFlags[gid] & EDGE_ELIGIBLE) == 0u) return;
             if (((vertexFlags[v0] | vertexFlags[v1]) & FLAG_COLLAPSED) != 0u) return;
