@@ -11,7 +11,7 @@ DECIMATION_SPVS = $(DECIMATION_COMPS:.comp=.spv)
 .DEFAULT_GOAL := build
 .PHONY: build test clean recomp_shaders recomp_decimation_shaders
 
-build: recomp_decimation_shaders VulkanLOD
+build: recomp_shaders recomp_decimation_shaders VulkanLOD
 
 VulkanLOD: $(SOURCES) $(HEADERS)
 	g++ $(CFLAGS) -o VulkanLOD $(SOURCES) $(LDFLAGS) -Wl,-rpath,/usr/local/lib

@@ -42,7 +42,7 @@ void main() {
     atomicOr(vertexFlags[v0], FLAG_BOUNDARY);
     atomicOr(vertexFlags[v1], FLAG_BOUNDARY);
 
-    if (costMode == COST_MODE_QEM && iteration == 0u) {
+    if (costMode == COST_MODE_QEM) {
         uint triIdx = edgeTriangles[gid * 2u + 0u];
         uint base = triIdx * 3u;
         uint ti0 = posIndices[base + 0u];
