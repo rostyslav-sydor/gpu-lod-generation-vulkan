@@ -81,6 +81,8 @@ void main() {
 
     uint actualTriCount = counters[COUNTER_TRIANGLE_COUNT];
     bool valid = (gid < actualTriCount);
+    if (valid && lightIteration != 0u && aliveFlags[gid] == 0u)
+        valid = false;
     bool nonDegenerate = false;
 
     uint i0, i1, i2;

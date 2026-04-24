@@ -939,6 +939,9 @@ void App::runDecimation() {
         vkCmdFillBuffer(cmd, decimationBufs[DB_HASHMAP_EDGE], 0, decimationBufSizes[DB_HASHMAP_EDGE], 0xFFFFFFFF);
         // Clear vertex flags
         vkCmdFillBuffer(cmd, decimationBufs[DB_VERTEX_FLAGS], 0, decimationBufSizes[DB_VERTEX_FLAGS], 0);
+        // Init aliveFlags to 1 (all triangles alive), posMap to 0 (no dirty vertices)
+        vkCmdFillBuffer(cmd, decimationBufs[DB_ALIVE], 0, decimationBufSizes[DB_ALIVE], 1);
+        vkCmdFillBuffer(cmd, decimationBufs[DB_POS_MAP], 0, decimationBufSizes[DB_POS_MAP], 0);
         // Clear counters
         vkCmdFillBuffer(cmd, decimationBufs[DB_COUNTER], 0, decimationBufSizes[DB_COUNTER], 0);
 
@@ -1020,7 +1023,11 @@ void App::runDecimation() {
         vkCmdResetQueryPool(cmd, iterTimestampPool, 0, maxDecimationIterations * TS_PER_ITER);
     }
 
+    const uint32_t fullRebuildFreq = 5;
+
     for (uint32_t iteration = 0; iteration < maxDecimationIterations; iteration++) {
+        bool isLight = (iteration > 0) && (iteration % fullRebuildFreq != 0);
+
         DecimationPushConstants pc{};
         pc.vertexCount = vertCount;
         pc.triangleCount = triCount;
@@ -1031,13 +1038,20 @@ void App::runDecimation() {
         pc.costMode = decimationCostMode;
         pc.costQuantBits = decimationCostQuantBits;
         pc.targetTriCount = std::max(1u, (uint32_t)(triCount * decimationTargetRatio));
+        pc.lightIteration = isLight ? 1u : 0u;
 
-        // Clear per-iteration counters (0,1,3,4) but preserve counter 2 (COUNTER_TRIANGLE_COUNT)
-        vkCmdFillBuffer(cmd, decimationBufs[DB_COUNTER], 0, 8, 0);
-        vkCmdFillBuffer(cmd, decimationBufs[DB_COUNTER], 12, 8, 0);
+        if (isLight) {
+            // Light iteration: preserve COUNTER_EDGE_COUNT (slot 0), clear others
+            vkCmdFillBuffer(cmd, decimationBufs[DB_COUNTER], 4, 4, 0);   // COLLAPSE_COUNT
+            vkCmdFillBuffer(cmd, decimationBufs[DB_COUNTER], 12, 8, 0);  // VERTEX_COUNT, COMPACT_COUNT
+        } else {
+            // Full iteration: clear all per-iteration counters
+            vkCmdFillBuffer(cmd, decimationBufs[DB_COUNTER], 0, 8, 0);
+            vkCmdFillBuffer(cmd, decimationBufs[DB_COUNTER], 12, 8, 0);
+            vkCmdFillBuffer(cmd, decimationBufs[DB_HASHMAP_EDGE], 0, edgeHashMapSize, 0xFFFFFFFF);
+        }
         vkCmdFillBuffer(cmd, decimationBufs[DB_ADJ_HEAD], 0, decimationBufSizes[DB_ADJ_HEAD], 0xFFFFFFFF);
         vkCmdFillBuffer(cmd, decimationBufs[DB_TRI_EDGE], 0, decimationBufSizes[DB_TRI_EDGE], 0);  // valence
-        vkCmdFillBuffer(cmd, decimationBufs[DB_HASHMAP_EDGE], 0, edgeHashMapSize, 0xFFFFFFFF);
         vkCmdFillBuffer(cmd, decimationBufs[DB_QUADRIC], 0, decimationBufSizes[DB_QUADRIC], 0);
         transferToComputeBarrier(cmd);
 
@@ -1052,30 +1066,43 @@ void App::runDecimation() {
         dispatchPass(cmd, 2, pc, triDispatchWGs);    // P3: build adjacency + valence
         computeBarrier(cmd);
         tsWrite(1);
-        dispatchPass(cmd, 3, pc, triDispatchWGs);    // P4: build edges
-        computeBarrier(cmd);
+
+        if (!isLight) {
+            dispatchPass(cmd, 3, pc, triDispatchWGs);    // P4: build edges
+            computeBarrier(cmd);
+        }
         tsWrite(2);
-        dispatchPass(cmd, 4, pc, edgeDispatchWGs);   // P4b: flag boundary
-        computeBarrier(cmd);
+
+        if (!isLight) {
+            dispatchPass(cmd, 4, pc, edgeDispatchWGs);   // P4b: flag boundary
+            computeBarrier(cmd);
+        }
         tsWrite(3);
+
         dispatchPass(cmd, 5, pc, triDispatchWGs);    // P5: quadrics + init triDescriptor
         computeBarrier(cmd);
         tsWrite(4);
         dispatchPass(cmd, 6, pc, edgeDispatchWGs);   // P6: cost + scatter (fused)
         computeBarrier(cmd);
         tsWrite(5);
-        dispatchPass(cmd, 7, pc, edgeDispatchWGs);   // P9: collapse
+        dispatchPass(cmd, 7, pc, edgeDispatchWGs);   // P9: collapse + mark dirty
         computeBarrier(cmd);
         tsWrite(6);
         dispatchPass(cmd, 8, pc, triDispatchWGs);    // P10: mark degenerate
         computeBarrier(cmd);
         tsWrite(7);
-        dispatchPass(cmd, 9, pc, triDispatchWGs);    // P11: compact
-        computeBarrier(cmd);
-        tsWrite(8);
-        dispatchPass(cmd, 10, pc, triDispatchWGs);   // P12: copyback
-        computeBarrier(cmd);
-        tsWrite(9);
+
+        if (!isLight) {
+            dispatchPass(cmd, 9, pc, triDispatchWGs);    // P11: compact
+            computeBarrier(cmd);
+            tsWrite(8);
+            dispatchPass(cmd, 10, pc, triDispatchWGs);   // P12: copyback
+            computeBarrier(cmd);
+            tsWrite(9);
+        } else {
+            tsWrite(8);
+            tsWrite(9);
+        }
 
         if (decimationLogEnabled) {
             VkMemoryBarrier barrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
@@ -1573,6 +1600,8 @@ void App::initInteractiveDecimation() {
         vkCmdFillBuffer(computeCommandBuffer, decimationBufs[DB_HASHMAP_POSITION], 0, decimationBufSizes[DB_HASHMAP_POSITION], 0xFFFFFFFF);
         vkCmdFillBuffer(computeCommandBuffer, decimationBufs[DB_HASHMAP_EDGE], 0, decimationBufSizes[DB_HASHMAP_EDGE], 0xFFFFFFFF);
         vkCmdFillBuffer(computeCommandBuffer, decimationBufs[DB_VERTEX_FLAGS], 0, decimationBufSizes[DB_VERTEX_FLAGS], 0);
+        vkCmdFillBuffer(computeCommandBuffer, decimationBufs[DB_ALIVE], 0, decimationBufSizes[DB_ALIVE], 1);
+        vkCmdFillBuffer(computeCommandBuffer, decimationBufs[DB_POS_MAP], 0, decimationBufSizes[DB_POS_MAP], 0);
         vkCmdFillBuffer(computeCommandBuffer, decimationBufs[DB_COUNTER], 0, decimationBufSizes[DB_COUNTER], 0);
 
         {
@@ -1591,6 +1620,7 @@ void App::initInteractiveDecimation() {
         pc.costMode = decimationCostMode;
         pc.costQuantBits = decimationCostQuantBits;
         pc.targetTriCount = std::max(1u, (uint32_t)(triCount * decimationTargetRatio));
+        pc.lightIteration = 0;
 
         auto dispatchPass = [&](uint32_t passIdx, uint32_t workgroups) {
             vkCmdBindPipeline(computeCommandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, decimationPipelines[passIdx]);
@@ -1689,6 +1719,8 @@ void App::stepInteractiveDecimation() {
             VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &barrier, 0, nullptr, 0, nullptr);
     };
 
+    bool isLight = (interactiveIteration > 0) && (interactiveIteration % 5 != 0);
+
     DecimationPushConstants pc{};
     pc.vertexCount = vertCount;
     pc.triangleCount = interactiveOrigTriCount;
@@ -1699,34 +1731,44 @@ void App::stepInteractiveDecimation() {
     pc.costMode = decimationCostMode;
     pc.costQuantBits = decimationCostQuantBits;
     pc.targetTriCount = std::max(1u, (uint32_t)(interactiveOrigTriCount * decimationTargetRatio));
+    pc.lightIteration = isLight ? 1u : 0u;
 
     // Clear per-iteration state
-    vkCmdFillBuffer(computeCommandBuffer, decimationBufs[DB_COUNTER], 0, 8, 0);
-    vkCmdFillBuffer(computeCommandBuffer, decimationBufs[DB_COUNTER], 12, 8, 0);
+    if (isLight) {
+        vkCmdFillBuffer(computeCommandBuffer, decimationBufs[DB_COUNTER], 4, 4, 0);
+        vkCmdFillBuffer(computeCommandBuffer, decimationBufs[DB_COUNTER], 12, 8, 0);
+    } else {
+        vkCmdFillBuffer(computeCommandBuffer, decimationBufs[DB_COUNTER], 0, 8, 0);
+        vkCmdFillBuffer(computeCommandBuffer, decimationBufs[DB_COUNTER], 12, 8, 0);
+        vkCmdFillBuffer(computeCommandBuffer, decimationBufs[DB_HASHMAP_EDGE], 0, decimationBufSizes[DB_HASHMAP_EDGE], 0xFFFFFFFF);
+    }
     vkCmdFillBuffer(computeCommandBuffer, decimationBufs[DB_ADJ_HEAD], 0, decimationBufSizes[DB_ADJ_HEAD], 0xFFFFFFFF);
     vkCmdFillBuffer(computeCommandBuffer, decimationBufs[DB_TRI_EDGE], 0, decimationBufSizes[DB_TRI_EDGE], 0);  // valence
-    vkCmdFillBuffer(computeCommandBuffer, decimationBufs[DB_HASHMAP_EDGE], 0, decimationBufSizes[DB_HASHMAP_EDGE], 0xFFFFFFFF);
     vkCmdFillBuffer(computeCommandBuffer, decimationBufs[DB_QUADRIC], 0, decimationBufSizes[DB_QUADRIC], 0);
     transferToComputeBarrier();
 
     dispatchPass(2, pc, triDispatchWGs);    // build adjacency + valence
     computeBarrier();
-    dispatchPass(3, pc, triDispatchWGs);    // build edges
-    computeBarrier();
-    dispatchPass(4, pc, edgeDispatchWGs);   // flag boundary
-    computeBarrier();
+    if (!isLight) {
+        dispatchPass(3, pc, triDispatchWGs);    // build edges
+        computeBarrier();
+        dispatchPass(4, pc, edgeDispatchWGs);   // flag boundary
+        computeBarrier();
+    }
     dispatchPass(5, pc, triDispatchWGs);    // quadrics + init descriptors
     computeBarrier();
     dispatchPass(6, pc, edgeDispatchWGs);   // cost + scatter
     computeBarrier();
-    dispatchPass(7, pc, edgeDispatchWGs);   // collapse
+    dispatchPass(7, pc, edgeDispatchWGs);   // collapse + mark dirty
     computeBarrier();
     dispatchPass(8, pc, triDispatchWGs);    // mark degenerate
     computeBarrier();
-    dispatchPass(9, pc, triDispatchWGs);    // compact
-    computeBarrier();
-    dispatchPass(10, pc, triDispatchWGs);   // copyback
-    computeBarrier();
+    if (!isLight) {
+        dispatchPass(9, pc, triDispatchWGs);    // compact
+        computeBarrier();
+        dispatchPass(10, pc, triDispatchWGs);   // copyback
+        computeBarrier();
+    }
 
     vkEndCommandBuffer(computeCommandBuffer);
     VkSubmitInfo submitInfo{VK_STRUCTURE_TYPE_SUBMIT_INFO};

@@ -142,6 +142,16 @@ void main() {
     uint v0 = edge.x;
     uint v1 = edge.y;
 
+    // Light iterations: skip clean edges (neither endpoint dirty)
+    if (lightIteration != 0u) {
+        bool dirty = (posMap[v0] == iteration) || (posMap[v1] == iteration);
+        if (!dirty) {
+            edgeCost[gid] = 1e30;
+            edgeFlags[gid] = 0u;
+            return;
+        }
+    }
+
     uint flags0 = vertexFlags[v0];
     uint flags1 = vertexFlags[v1];
 

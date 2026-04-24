@@ -135,6 +135,7 @@ layout(push_constant) uniform PushConstants {
     uint costMode;
     uint costQuantBits;
     uint targetTriCount;
+    uint lightIteration;
 };
 
 // ============================================================================

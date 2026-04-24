@@ -35,6 +35,8 @@ void main() {
     uint gid = gl_GlobalInvocationID.x;
     if (gid >= counters[COUNTER_TRIANGLE_COUNT]) return;
 
+    if (lightIteration != 0u && aliveFlags[gid] == 0u) return;
+
     uint baseIdx = gid * 3u;
 
     for (uint k = 0u; k < 3u; k++) {

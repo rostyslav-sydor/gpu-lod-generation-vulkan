@@ -82,6 +82,7 @@ struct DecimationPushConstants {
     uint32_t costMode;
     uint32_t costQuantBits;
     uint32_t targetTriCount;
+    uint32_t lightIteration;
 };
 
 enum DecimationBuffer {
