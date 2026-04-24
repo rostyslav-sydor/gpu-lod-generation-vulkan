@@ -14,8 +14,8 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from matplotlib.ticker import AutoMinorLocator
 
-RUNS_CSV = "main_runs.csv"
-ITER_CSV = "main_interations.csv"
+RUNS_CSV = "decim_runs.csv"
+ITER_CSV = "decim_iterations.csv"
 PLOT_DIR = "plots"
 
 MODEL_NAMES = {
@@ -56,6 +56,51 @@ runs['logged'] = runs['run_id'].isin(logged_run_ids)
 # Detect models present in data and set order
 MODEL_ORDER = [m for m in ["scene.gltf", "Armadillo.ply", "buddha.ply", "Glykon.obj"]
                if m in runs['model'].values]
+
+
+# ── Trim iterations to convergence ────────────────────────────────────
+# For each run, keep only iterations up to the last one with collapses > 0.
+# This removes the long zero-tail from all downstream plots and analysis.
+
+if not iters.empty and 'collapses' in iters.columns:
+    orig_len = len(iters)
+    # Find last active iteration per run
+    active = iters[iters['collapses'] > 0]
+    last_active = active.groupby('run_id')['iteration'].max().rename('last_active_iter')
+    iters = iters.merge(last_active, on='run_id', how='left')
+    iters['last_active_iter'] = iters['last_active_iter'].fillna(0)
+    iters = iters[iters['iteration'] <= iters['last_active_iter']].drop(columns='last_active_iter')
+    print(f"Trimmed iterations: {orig_len} → {len(iters)} rows "
+          f"(removed {orig_len - len(iters)} post-convergence rows)")
+
+
+# ── Compute effective GPU time (up to convergence) ─────────────────────
+# Sum per-iteration compute times for active iterations, then add back
+# per-iteration fill/barrier overhead proportionally.
+
+def effective_gpu_ms(run_id, raw_gpu_ms, total_recorded_iters):
+    """Estimate GPU time if we'd stopped at convergence."""
+    it = iters[iters['run_id'] == int(run_id)]
+    if it.empty or 'iter_gpu_ms' not in it.columns:
+        return raw_gpu_ms, np.nan
+    conv_iters = len(it)
+    active_compute = it['iter_gpu_ms'].sum()
+    total_compute_est = raw_gpu_ms  # includes fills+barriers for all recorded iters
+
+    overhead = max(0, raw_gpu_ms - active_compute * total_recorded_iters / conv_iters)
+    overhead_per_iter = overhead / total_recorded_iters if total_recorded_iters > 0 else 0
+
+    eff = active_compute + overhead_per_iter * conv_iters
+    return eff, conv_iters
+
+eff_data = {}
+for _, row in runs.iterrows():
+    rid = row['run_id']
+    if rid not in eff_data:
+        eff_data[rid] = effective_gpu_ms(rid, row['gpu_ms'], row.get('max_iterations', 300))
+
+runs['eff_gpu_ms'] = runs['run_id'].map(lambda r: eff_data[r][0])
+runs['conv_iters'] = runs['run_id'].map(lambda r: eff_data[r][1])
 
 # ── Tag experiments ────────────────────────────────────────────────────────
 
@@ -128,10 +173,10 @@ else:
 
 
 def median_row(group, prefer_clean=True):
-    """Pick the row closest to median gpu_ms. Prefers clean (non-logged) runs for timing."""
+    """Pick the row closest to median eff_gpu_ms (converged timing)."""
     pool = group[~group['logged']] if (prefer_clean and (~group['logged']).any()) else group
-    med = pool['gpu_ms'].median()
-    closest = (pool['gpu_ms'] - med).abs().idxmin()
+    med = pool['eff_gpu_ms'].median()
+    closest = (pool['eff_gpu_ms'] - med).abs().idxmin()
     return pool.loc[closest]
 
 
@@ -140,8 +185,8 @@ def logged_row(group):
     pool = group[group['logged']]
     if pool.empty:
         pool = group
-    med = pool['gpu_ms'].median()
-    closest = (pool['gpu_ms'] - med).abs().idxmin()
+    med = pool['eff_gpu_ms'].median()
+    closest = (pool['eff_gpu_ms'] - med).abs().idxmin()
     return pool.loc[closest]
 
 
@@ -154,7 +199,7 @@ exp1['freq'] = exp1['freq'].astype(int)
 
 exp1_med = exp1.groupby(['model', 'freq']).apply(
     lambda g: pd.Series({
-        'gpu_ms': g[~g['logged']]['gpu_ms'].median() if (~g['logged']).any() else g['gpu_ms'].median(),
+        'gpu_ms': g['eff_gpu_ms'].median(),
         'final_tris': g['gpu_final_tris'].median(),
         'run_id_clean': median_row(g, prefer_clean=True)['run_id'],
         'run_id_logged': logged_row(g)['run_id'],
@@ -310,7 +355,7 @@ for model, ratio in timing_rows:
         if g.empty:
             # Fall back to exp1 data for mode 0 at ratio 0.1 (use best freq)
             g = exp1[(exp1['model'] == model) & (exp1['freq'] == 5)]  # default freq
-        vals.append(f"{g['gpu_ms'].median():.1f}" if not g.empty else "--")
+        vals.append(f"{g['eff_gpu_ms'].median():.1f}" if not g.empty else "--")
 
     cpu_g = cpu_runs[(cpu_runs['model'] == model) & (cpu_runs['target_ratio'] == ratio)]
     cpu_val = f"{cpu_g['cpu_ms'].median():.1f}" if (not cpu_g.empty and cpu_g['cpu_ms'].notna().any()) else "--"
@@ -454,7 +499,7 @@ for model in MODEL_ORDER:
     gpu_g = runs[(runs['experiment'] == 'exp3') & (runs['model'] == model) & (runs['max_iterations'] == 300)]
     if gpu_g.empty:
         gpu_g = exp2[(exp2['model'] == model) & (exp2['target_ratio'] == 0.1) & (exp2['cost_mode'] == 0)]
-    gpu_ms = gpu_g['gpu_ms'].median() if not gpu_g.empty else np.nan
+    gpu_ms = gpu_g['eff_gpu_ms'].median() if not gpu_g.empty else np.nan
 
     # CPU data
     cpu_g = cpu_runs[(cpu_runs['model'] == model) & (cpu_runs['target_ratio'] == 0.1)]
@@ -493,7 +538,7 @@ for model in MODEL_ORDER:
     if gpu_g.empty:
         gpu_g = exp2[(exp2['model'] == model) & (exp2['target_ratio'] == 0.1) & (exp2['cost_mode'] == 0)]
     if not gpu_g.empty:
-        gpu_points.append((otris, gpu_g['gpu_ms'].median()))
+        gpu_points.append((otris, gpu_g['eff_gpu_ms'].median()))
 
     cpu_g = cpu_runs[(cpu_runs['model'] == model) & (cpu_runs['target_ratio'] == 0.1)]
     if not cpu_g.empty and cpu_g['cpu_ms'].notna().any():
@@ -541,6 +586,59 @@ fig.savefig(f"{PLOT_DIR}/collapses_per_iter.png", dpi=150, bbox_inches='tight')
 plt.close(fig)
 print(f"→ Saved {PLOT_DIR}/collapses_per_iter.png")
 
+# ── Plot: Triangles over cumulative GPU time ──
+
+fig, ax = plt.subplots(figsize=(8, 5))
+colors_iter = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728']
+for model, color in zip(MODEL_ORDER, colors_iter):
+    gpu_g = runs[(runs['experiment'] == 'exp3') & (runs['model'] == model) & (runs['max_iterations'] == 300)]
+    if gpu_g.empty:
+        gpu_g = exp2[(exp2['model'] == model) & (exp2['target_ratio'] == 0.1) & (exp2['cost_mode'] == 0)]
+    if gpu_g.empty:
+        continue
+    rid = logged_row(gpu_g)['run_id']
+    it = iters[iters['run_id'] == int(rid)].sort_values('iteration')
+    if it.empty:
+        continue
+    cum_ms = it['iter_gpu_ms'].cumsum()
+    ax.plot(cum_ms, it['tri_after'], color=color, lw=1.5,
+            label=f"{MODEL_NAMES[model]} ({MODEL_TRIS[model]} tris)")
+
+ax.set_xlabel("Cumulative GPU time (ms)")
+ax.set_ylabel("Triangles remaining")
+ax.set_title("Triangle Reduction vs. GPU Time (Mode 0, ratio=0.1)")
+ax.legend()
+fig.tight_layout()
+fig.savefig(f"{PLOT_DIR}/tris_vs_time.png", dpi=150, bbox_inches='tight')
+plt.close(fig)
+print(f"→ Saved {PLOT_DIR}/tris_vs_time.png")
+
+# ── Plot: Iterations over cumulative GPU time ──
+
+fig, ax = plt.subplots(figsize=(8, 5))
+for model, color in zip(MODEL_ORDER, colors_iter):
+    gpu_g = runs[(runs['experiment'] == 'exp3') & (runs['model'] == model) & (runs['max_iterations'] == 300)]
+    if gpu_g.empty:
+        gpu_g = exp2[(exp2['model'] == model) & (exp2['target_ratio'] == 0.1) & (exp2['cost_mode'] == 0)]
+    if gpu_g.empty:
+        continue
+    rid = logged_row(gpu_g)['run_id']
+    it = iters[iters['run_id'] == int(rid)].sort_values('iteration')
+    if it.empty:
+        continue
+    cum_ms = it['iter_gpu_ms'].cumsum()
+    ax.plot(cum_ms, it['iteration'], color=color, lw=1.5,
+            label=f"{MODEL_NAMES[model]} ({MODEL_TRIS[model]} tris)")
+
+ax.set_xlabel("Cumulative GPU time (ms)")
+ax.set_ylabel("Iteration")
+ax.set_title("Iteration Progress vs. GPU Time (Mode 0, ratio=0.1)")
+ax.legend()
+fig.tight_layout()
+fig.savefig(f"{PLOT_DIR}/iters_vs_time.png", dpi=150, bbox_inches='tight')
+plt.close(fig)
+print(f"→ Saved {PLOT_DIR}/iters_vs_time.png")
+
 
 # ══════════════════════════════════════════════════════════════════════════
 # SUMMARY
@@ -555,6 +653,22 @@ print(f"  Exp2 (cost modes):  {len(exp2)}")
 print(f"  Exp3 (scalability): {(runs['experiment'] == 'exp3').sum()}")
 print(f"  CPU baselines:      {len(cpu_runs)}")
 print(f"Models: {', '.join(MODEL_NAMES[m] for m in MODEL_ORDER)}")
+
+# Show convergence cutoff impact
+has_both = runs[runs['conv_iters'].notna() & (runs['gpu_ms'] > 0)]
+if not has_both.empty:
+    print(f"\nConvergence cutoff (effective GPU time):")
+    for model in MODEL_ORDER:
+        mg = has_both[has_both['model'] == model]
+        if mg.empty:
+            continue
+        raw = mg['gpu_ms'].median()
+        eff = mg['eff_gpu_ms'].median()
+        conv = mg['conv_iters'].median()
+        max_it = mg['max_iterations'].median()
+        print(f"  {MODEL_NAMES[model]}: {raw:.1f}ms → {eff:.1f}ms "
+              f"(converged at iter {conv:.0f}/{max_it:.0f})")
+
 print(f"\nPlots saved to {PLOT_DIR}/:")
 for f in sorted(os.listdir(PLOT_DIR)):
     if f.endswith('.png'):

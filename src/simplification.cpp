@@ -1135,7 +1135,7 @@ void App::runDecimation() {
 
         // Normal (batched) path
         if (isLight) {
-            vkCmdFillBuffer(cmd, decimationBufs[DB_COUNTER], 4, 4, 0);   // COLLAPSE_COUNT
+            // Don't clear COLLAPSE_COUNT — P3 thread 0 reads it to update TRIANGLE_COUNT
             vkCmdFillBuffer(cmd, decimationBufs[DB_COUNTER], 12, 8, 0);  // VERTEX_COUNT, COMPACT_COUNT
         } else {
             // Full iteration: clear all per-iteration counters
@@ -1855,7 +1855,7 @@ void App::stepInteractiveDecimation() {
 
     // Clear per-iteration state
     if (isLight) {
-        vkCmdFillBuffer(computeCommandBuffer, decimationBufs[DB_COUNTER], 4, 4, 0);
+        // Don't clear COLLAPSE_COUNT — P3 thread 0 reads it to update TRIANGLE_COUNT
         vkCmdFillBuffer(computeCommandBuffer, decimationBufs[DB_COUNTER], 12, 8, 0);
     } else {
         vkCmdFillBuffer(computeCommandBuffer, decimationBufs[DB_COUNTER], 0, 8, 0);
