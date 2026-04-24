@@ -1,8 +1,15 @@
-CFLAGS = -std=c++17 -O2 -I./include/ -I/usr/local/include
-LDFLAGS = -L/usr/local/lib -lglfw -lvulkan -ldl -lpthread -lX11 -lXxf86vm -lXrandr -lXi -lglm -lassimp -lmeshoptimizer
+CFLAGS = -std=c++17 -O2 -I./include/
 SHADER_DBG_FLAGS = -O
 SOURCES := $(wildcard src/*.cpp)
 HEADERS := $(wildcard include/*.hpp)
+
+ifeq ($(OS),Windows_NT)
+  # MSYS2/MinGW on Windows
+  LDFLAGS = -lglfw3 -lvulkan-1 -lassimp -lmeshoptimizer -lgdi32 -lshell32
+else
+  CFLAGS += -I/usr/local/include
+  LDFLAGS = -L/usr/local/lib -lglfw -lvulkan -ldl -lpthread -lX11 -lXxf86vm -lXrandr -lXi -lassimp -lmeshoptimizer -Wl,-rpath,/usr/local/lib
+endif
 
 DECIMATION_DIR = shaders2/mesh_decimation
 DECIMATION_COMPS = $(sort $(wildcard $(DECIMATION_DIR)/*.comp) $(wildcard shaders/*.comp))
@@ -14,7 +21,7 @@ DECIMATION_SPVS = $(DECIMATION_COMPS:.comp=.spv)
 build: recomp_decimation_shaders VulkanLOD
 
 VulkanLOD: $(SOURCES) $(HEADERS)
-	g++ $(CFLAGS) -o VulkanLOD $(SOURCES) $(LDFLAGS) -Wl,-rpath,/usr/local/lib
+	g++ $(CFLAGS) -o VulkanLOD $(SOURCES) $(LDFLAGS)
 
 
 shaders/vert.spv: shaders/vertex.glsl
