@@ -1,0 +1,26 @@
+#version 460
+//
+// Pass 13: Convergence gate — writes indirect dispatch args for subsequent passes.
+//
+// Dispatch: (1, 1, 1) — single thread.
+// If target triangle count is reached, writes zero workgroups so all
+// subsequent vkCmdDispatchIndirect calls become true no-ops.
+
+#include "common.glsl"
+#include "bindings.glsl"
+
+layout(local_size_x = 1) in;
+
+void main() {
+    bool done = (counters[COUNTER_TRIANGLE_COUNT] <= targetTriCount);
+
+    uint triWGs  = done ? 0u : (triangleCount + WORKGROUP_SIZE - 1u) / WORKGROUP_SIZE;
+    uint edgeWGs = done ? 0u : (edgeCount     + WORKGROUP_SIZE - 1u) / WORKGROUP_SIZE;
+
+    counters[COUNTER_INDIRECT_TRI_X]  = triWGs;
+    counters[COUNTER_INDIRECT_TRI_Y]  = 1u;
+    counters[COUNTER_INDIRECT_TRI_Z]  = 1u;
+    counters[COUNTER_INDIRECT_EDGE_X] = edgeWGs;
+    counters[COUNTER_INDIRECT_EDGE_Y] = 1u;
+    counters[COUNTER_INDIRECT_EDGE_Z] = 1u;
+}

@@ -19,6 +19,15 @@
 #define COUNTER_VERTEX_COUNT    3
 #define COUNTER_COMPACT_COUNT   4
 
+// Indirect dispatch args stored at counters[6..11]
+// Layout: {triWGs, 1, 1, edgeWGs, 1, 1}
+#define COUNTER_INDIRECT_TRI_X  6
+#define COUNTER_INDIRECT_TRI_Y  7
+#define COUNTER_INDIRECT_TRI_Z  8
+#define COUNTER_INDIRECT_EDGE_X 9
+#define COUNTER_INDIRECT_EDGE_Y 10
+#define COUNTER_INDIRECT_EDGE_Z 11
+
 // Vertex flags
 #define FLAG_DISCONTINUITY  (1u << 0)
 #define FLAG_BOUNDARY       (1u << 1)

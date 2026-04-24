@@ -349,7 +349,8 @@ void App::createDecimationPipelines() {
         "04_build_edges", "04b_flag_boundary",
         "05_compute_quadrics", "06_compute_cost_and_scatter",
         "09_collapse_edges",
-        "10_mark_degenerate", "11_compact", "12_copy_back"
+        "10_mark_degenerate", "11_compact", "12_copy_back",
+        "13_gate"
     };
 
     for (uint32_t i = 0; i < DECIMATION_PASS_COUNT; i++) {
@@ -422,6 +423,7 @@ void App::allocateDecimationBuffers(uint32_t vertCount, uint32_t triCount) {
         VkBufferCreateInfo bufInfo{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
         bufInfo.size = decimationBufSizes[i];
         bufInfo.usage = storageUsage;
+        if (i == DB_COUNTER) bufInfo.usage |= VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT;
         bufInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
         if (vkCreateBuffer(device, &bufInfo, nullptr, &decimationBufs[i]) != VK_SUCCESS) {
             decimationUseDeviceLocal = false;
@@ -454,7 +456,9 @@ void App::allocateDecimationBuffers(uint32_t vertCount, uint32_t triCount) {
         }
         std::cout << "  [WARNING] DEVICE_LOCAL alloc failed, falling back to HOST_VISIBLE (slower)\n";
         for (int i = 0; i < DB_COUNT; i++) {
-            createBuffer(decimationBufSizes[i], storageUsage,
+            VkBufferUsageFlags usage = storageUsage;
+            if (i == DB_COUNTER) usage |= VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT;
+            createBuffer(decimationBufSizes[i], usage,
                 VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
                 decimationBufs[i], decimationMem[i]);
         }

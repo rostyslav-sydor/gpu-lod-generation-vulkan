@@ -893,6 +893,29 @@ void App::runDecimation() {
         vkCmdDispatch(cmd, workgroups, 1, 1);
     };
 
+    // Byte offsets into DB_COUNTER for indirect dispatch args
+    constexpr VkDeviceSize INDIRECT_TRI_OFFSET  = 6 * sizeof(uint32_t);   // counters[6]
+    constexpr VkDeviceSize INDIRECT_EDGE_OFFSET = 9 * sizeof(uint32_t);   // counters[9]
+
+    // --- Helper: indirect dispatch from counter buffer ---
+    auto indirectDispatchPass = [&](VkCommandBuffer cmd, uint32_t passIdx, const DecimationPushConstants& pc, VkDeviceSize indirectOffset) {
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, decimationPipelines[passIdx]);
+        vkCmdPushConstants(cmd, decimationPipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT,
+            0, sizeof(DecimationPushConstants), &pc);
+        vkCmdDispatchIndirect(cmd, decimationBufs[DB_COUNTER], indirectOffset);
+    };
+
+    // --- Helper: compute->indirect+compute barrier (after gate shader) ---
+    auto gateBarrier = [&](VkCommandBuffer cmd) {
+        VkMemoryBarrier barrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+        barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+        barrier.dstAccessMask = VK_ACCESS_INDIRECT_COMMAND_READ_BIT
+                              | VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            0, 1, &barrier, 0, nullptr, 0, nullptr);
+    };
+
     // --- Helper: submit command buffer and wait ---
     auto submitAndWait = [&](VkCommandBuffer cmd) {
         vkEndCommandBuffer(cmd);
@@ -982,14 +1005,17 @@ void App::runDecimation() {
     // ======================================================================
     // Phase 2: Iterative decimation loop (batched)
     // ======================================================================
-    // Pipeline indices (11 total):
+    // Pipeline indices (12 total):
     //   0: hash_vertices   1: dedup_indices   2: build_adjacency  3: build_edges
     //   4: flag_boundary   5: compute_quadrics (+ init descriptors)
     //   6: compute_cost_and_scatter (fused P6+P8)
     //   7: collapse_edges   8: mark_degenerate   9: compact   10: copy_back
+    //   11: gate (convergence check → writes indirect dispatch args)
     //
     // Shaders read triCount from counters[COUNTER_TRIANGLE_COUNT] on the GPU,
     // so we can record many iterations into one command buffer without CPU sync.
+    // After convergence, the gate shader zeros workgroup counts so all
+    // subsequent vkCmdDispatchIndirect calls become true no-ops.
 
     VkDeviceSize edgeHashMapSize = decimationBufSizes[DB_HASHMAP_EDGE];
 
@@ -1157,6 +1183,10 @@ void App::runDecimation() {
 
         transferToComputeBarrier(cmd);
 
+        // Gate shader: writes indirect dispatch args (0 workgroups if converged)
+        dispatchPass(cmd, 11, pc, 1);                // P13: gate (1 workgroup)
+        gateBarrier(cmd);
+
         uint32_t tsBase = iteration * TS_PER_ITER;
         auto tsWrite = [&](uint32_t localIdx) {
             if (decimationLogEnabled)
@@ -1165,40 +1195,40 @@ void App::runDecimation() {
         };
 
         tsWrite(0);  // iteration start (after clears)
-        dispatchPass(cmd, 2, pc, triDispatchWGs);    // P3: build adjacency + valence
+        indirectDispatchPass(cmd, 2, pc, INDIRECT_TRI_OFFSET);     // P3: build adjacency + valence
         computeBarrier(cmd);
         tsWrite(1);
 
         if (!isLight) {
-            dispatchPass(cmd, 3, pc, triDispatchWGs);    // P4: build edges
+            indirectDispatchPass(cmd, 3, pc, INDIRECT_TRI_OFFSET);     // P4: build edges
             computeBarrier(cmd);
         }
         tsWrite(2);
 
         if (!isLight) {
-            dispatchPass(cmd, 4, pc, edgeDispatchWGs);   // P4b: flag boundary
+            indirectDispatchPass(cmd, 4, pc, INDIRECT_EDGE_OFFSET);    // P4b: flag boundary
             computeBarrier(cmd);
         }
         tsWrite(3);
 
-        dispatchPass(cmd, 5, pc, triDispatchWGs);    // P5: quadrics + init triDescriptor
+        indirectDispatchPass(cmd, 5, pc, INDIRECT_TRI_OFFSET);    // P5: quadrics + init triDescriptor
         computeBarrier(cmd);
         tsWrite(4);
-        dispatchPass(cmd, 6, pc, edgeDispatchWGs);   // P6: cost + scatter (fused)
+        indirectDispatchPass(cmd, 6, pc, INDIRECT_EDGE_OFFSET);   // P6: cost + scatter (fused)
         computeBarrier(cmd);
         tsWrite(5);
-        dispatchPass(cmd, 7, pc, edgeDispatchWGs);   // P9: collapse + mark dirty
+        indirectDispatchPass(cmd, 7, pc, INDIRECT_EDGE_OFFSET);   // P9: collapse + mark dirty
         computeBarrier(cmd);
         tsWrite(6);
-        dispatchPass(cmd, 8, pc, triDispatchWGs);    // P10: mark degenerate
+        indirectDispatchPass(cmd, 8, pc, INDIRECT_TRI_OFFSET);    // P10: mark degenerate
         computeBarrier(cmd);
         tsWrite(7);
 
         if (!isLight) {
-            dispatchPass(cmd, 9, pc, triDispatchWGs);    // P11: compact
+            indirectDispatchPass(cmd, 9, pc, INDIRECT_TRI_OFFSET);     // P11: compact
             computeBarrier(cmd);
             tsWrite(8);
-            dispatchPass(cmd, 10, pc, triDispatchWGs);   // P12: copyback
+            indirectDispatchPass(cmd, 10, pc, INDIRECT_TRI_OFFSET);    // P12: copyback
             computeBarrier(cmd);
             // Reset aliveFlags after compaction (triangle indices were renumbered)
             vkCmdFillBuffer(cmd, decimationBufs[DB_ALIVE], 0, decimationBufSizes[DB_ALIVE], 1);
