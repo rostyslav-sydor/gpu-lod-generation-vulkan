@@ -17,10 +17,20 @@ VulkanLOD: $(SOURCES) $(HEADERS)
 	g++ $(CFLAGS) -o VulkanLOD $(SOURCES) $(LDFLAGS) -Wl,-rpath,/usr/local/lib
 
 
+shaders/vert.spv: shaders/vertex.glsl
+	glslc -fshader-stage=vert --target-env=vulkan1.4 $(SHADER_DBG_FLAGS) $< -o $@
+
+shaders/frag.spv: shaders/fragment.glsl
+	glslc -fshader-stage=frag --target-env=vulkan1.4 $(SHADER_DBG_FLAGS) $< -o $@
+
+shaders/comp.spv: shaders/simpify.glsl
+	glslc -fshader-stage=comp --target-env=vulkan1.4 $(SHADER_DBG_FLAGS) $< -o $@
+
 $(DECIMATION_DIR)/%.spv: $(DECIMATION_DIR)/%.comp $(DECIMATION_DIR)/common.glsl $(DECIMATION_DIR)/bindings.glsl
 	glslc -fshader-stage=comp --target-env=vulkan1.4 -I $(DECIMATION_DIR) $(SHADER_DBG_FLAGS) $< -o $@
 
-recomp_decimation_shaders: $(DECIMATION_SPVS)
+RENDER_SPVS = shaders/vert.spv shaders/frag.spv shaders/comp.spv
+recomp_decimation_shaders: $(RENDER_SPVS) $(DECIMATION_SPVS)
 
 all: recomp_decimation_shaders VulkanLOD test
 
