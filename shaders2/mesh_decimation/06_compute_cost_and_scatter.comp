@@ -30,13 +30,6 @@
 
 layout(local_size_x = WORKGROUP_SIZE) in;
 
-uint countAdjacent(uint vertIdx) {
-    uint count = 0u;
-    uint idx = adjHead[vertIdx];
-    while (idx != NONE) { count++; idx = triAdjNext[idx]; }
-    return count;
-}
-
 // Discrete Gaussian curvature via angle deficit: 2π - Σ(interior angles at v)
 float vertexCurvature(uint vertIdx) {
     float angleSum = 0.0;
@@ -158,8 +151,8 @@ void main() {
     bool isBoundary = (eTri1 == NONE);
     if (isBoundary) eFlags |= EDGE_BOUNDARY;
 
-    uint valence0 = countAdjacent(v0);
-    uint valence1 = countAdjacent(v1);
+    uint valence0 = valence[v0];
+    uint valence1 = valence[v1];
     int mergedValence = int(valence0) + int(valence1) - 4;
     if (mergedValence > 20 || mergedValence <= 3) {
         edgeCost[gid] = 1e30;

@@ -970,10 +970,11 @@ void App::runDecimation() {
     // ======================================================================
     // Phase 2: Iterative decimation loop (batched)
     // ======================================================================
-    // Pipeline indices (10 total):
+    // Pipeline indices (11 total):
     //   0: hash_vertices   1: dedup_indices   2: build_adjacency  3: build_edges
-    //   4: compute_quadrics (+ init descriptors)   5: compute_cost_and_scatter (fused P6+P7+P8)
-    //   6: collapse_edges   7: mark_degenerate   8: compact   9: copy_back
+    //   4: flag_boundary   5: compute_quadrics (+ init descriptors)
+    //   6: compute_cost_and_scatter (fused P6+P8)
+    //   7: collapse_edges   8: mark_degenerate   9: compact   10: copy_back
     //
     // Shaders read triCount from counters[COUNTER_TRIANGLE_COUNT] on the GPU,
     // so we can record many iterations into one command buffer without CPU sync.
@@ -985,8 +986,8 @@ void App::runDecimation() {
 
     // Per-iteration logging resources (only when DECIM_LOG=1)
     const uint32_t COUNTERS_PER_ITER = 5;
-    const uint32_t PASSES_PER_ITER = 8;
-    const uint32_t TS_PER_ITER = PASSES_PER_ITER + 1; // 1 start + 8 pass ends
+    const uint32_t PASSES_PER_ITER = 9;
+    const uint32_t TS_PER_ITER = PASSES_PER_ITER + 1; // 1 start + 9 pass ends
     VkBuffer iterStatsBuf = VK_NULL_HANDLE;
     VkDeviceMemory iterStatsMem = VK_NULL_HANDLE;
     VkQueryPool iterTimestampPool = VK_NULL_HANDLE;
@@ -1035,6 +1036,7 @@ void App::runDecimation() {
         vkCmdFillBuffer(cmd, decimationBufs[DB_COUNTER], 0, 8, 0);
         vkCmdFillBuffer(cmd, decimationBufs[DB_COUNTER], 12, 8, 0);
         vkCmdFillBuffer(cmd, decimationBufs[DB_ADJ_HEAD], 0, decimationBufSizes[DB_ADJ_HEAD], 0xFFFFFFFF);
+        vkCmdFillBuffer(cmd, decimationBufs[DB_TRI_EDGE], 0, decimationBufSizes[DB_TRI_EDGE], 0);  // valence
         vkCmdFillBuffer(cmd, decimationBufs[DB_HASHMAP_EDGE], 0, edgeHashMapSize, 0xFFFFFFFF);
         vkCmdFillBuffer(cmd, decimationBufs[DB_QUADRIC], 0, decimationBufSizes[DB_QUADRIC], 0);
         transferToComputeBarrier(cmd);
@@ -1047,30 +1049,33 @@ void App::runDecimation() {
         };
 
         tsWrite(0);  // iteration start (after clears)
-        dispatchPass(cmd, 2, pc, triDispatchWGs);    // P3: build adjacency
+        dispatchPass(cmd, 2, pc, triDispatchWGs);    // P3: build adjacency + valence
         computeBarrier(cmd);
         tsWrite(1);
         dispatchPass(cmd, 3, pc, triDispatchWGs);    // P4: build edges
         computeBarrier(cmd);
         tsWrite(2);
-        dispatchPass(cmd, 4, pc, triDispatchWGs);    // P5: quadrics + init triDescriptor
+        dispatchPass(cmd, 4, pc, edgeDispatchWGs);   // P4b: flag boundary
         computeBarrier(cmd);
         tsWrite(3);
-        dispatchPass(cmd, 5, pc, edgeDispatchWGs);   // P6: cost + scatter (fused)
+        dispatchPass(cmd, 5, pc, triDispatchWGs);    // P5: quadrics + init triDescriptor
         computeBarrier(cmd);
         tsWrite(4);
-        dispatchPass(cmd, 6, pc, edgeDispatchWGs);   // P9: collapse
+        dispatchPass(cmd, 6, pc, edgeDispatchWGs);   // P6: cost + scatter (fused)
         computeBarrier(cmd);
         tsWrite(5);
-        dispatchPass(cmd, 7, pc, triDispatchWGs);    // P10: mark degenerate
+        dispatchPass(cmd, 7, pc, edgeDispatchWGs);   // P9: collapse
         computeBarrier(cmd);
         tsWrite(6);
-        dispatchPass(cmd, 8, pc, triDispatchWGs);    // P11: compact
+        dispatchPass(cmd, 8, pc, triDispatchWGs);    // P10: mark degenerate
         computeBarrier(cmd);
         tsWrite(7);
-        dispatchPass(cmd, 9, pc, triDispatchWGs);    // P12: copyback
+        dispatchPass(cmd, 9, pc, triDispatchWGs);    // P11: compact
         computeBarrier(cmd);
         tsWrite(8);
+        dispatchPass(cmd, 10, pc, triDispatchWGs);   // P12: copyback
+        computeBarrier(cmd);
+        tsWrite(9);
 
         if (decimationLogEnabled) {
             VkMemoryBarrier barrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
@@ -1125,7 +1130,7 @@ void App::runDecimation() {
     struct IterStats {
         uint32_t edges, collapses, triangles, eligible, compacted;
         double gpu_ms;
-        double pass_ms[8]; // per-pass GPU time
+        double pass_ms[9]; // per-pass GPU time
     };
     std::vector<IterStats> iterData;
     if (decimationLogEnabled) {
@@ -1164,19 +1169,19 @@ void App::runDecimation() {
 
         // Print per-pass average breakdown
         const char* passNames[] = {
-            "build_adj", "build_edges", "quadrics", "cost+scatter",
+            "build_adj", "build_edges", "flag_bndry", "quadrics", "cost+scatter",
             "collapse", "mark_degen", "compact", "copyback"
         };
-        double avgPass[8] = {};
+        double avgPass[PASSES_PER_ITER] = {};
         for (auto& it : iterData)
-            for (int p = 0; p < 8; p++) avgPass[p] += it.pass_ms[p];
+            for (uint32_t p = 0; p < PASSES_PER_ITER; p++) avgPass[p] += it.pass_ms[p];
         double totalAvg = 0;
-        for (int p = 0; p < 8; p++) {
+        for (uint32_t p = 0; p < PASSES_PER_ITER; p++) {
             avgPass[p] /= maxDecimationIterations;
             totalAvg += avgPass[p];
         }
         std::cout << "  Per-pass avg breakdown:\n";
-        for (int p = 0; p < 8; p++) {
+        for (uint32_t p = 0; p < PASSES_PER_ITER; p++) {
             double pct = (totalAvg > 0) ? (avgPass[p] / totalAvg * 100.0) : 0.0;
             std::cout << "    " << std::setw(14) << std::left << passNames[p]
                       << std::right << std::fixed << std::setprecision(3) << std::setw(8) << avgPass[p] << " ms"
@@ -1699,25 +1704,28 @@ void App::stepInteractiveDecimation() {
     vkCmdFillBuffer(computeCommandBuffer, decimationBufs[DB_COUNTER], 0, 8, 0);
     vkCmdFillBuffer(computeCommandBuffer, decimationBufs[DB_COUNTER], 12, 8, 0);
     vkCmdFillBuffer(computeCommandBuffer, decimationBufs[DB_ADJ_HEAD], 0, decimationBufSizes[DB_ADJ_HEAD], 0xFFFFFFFF);
+    vkCmdFillBuffer(computeCommandBuffer, decimationBufs[DB_TRI_EDGE], 0, decimationBufSizes[DB_TRI_EDGE], 0);  // valence
     vkCmdFillBuffer(computeCommandBuffer, decimationBufs[DB_HASHMAP_EDGE], 0, decimationBufSizes[DB_HASHMAP_EDGE], 0xFFFFFFFF);
     vkCmdFillBuffer(computeCommandBuffer, decimationBufs[DB_QUADRIC], 0, decimationBufSizes[DB_QUADRIC], 0);
     transferToComputeBarrier();
 
-    dispatchPass(2, pc, triDispatchWGs);    // build adjacency
+    dispatchPass(2, pc, triDispatchWGs);    // build adjacency + valence
     computeBarrier();
     dispatchPass(3, pc, triDispatchWGs);    // build edges
     computeBarrier();
-    dispatchPass(4, pc, triDispatchWGs);    // quadrics + init descriptors
+    dispatchPass(4, pc, edgeDispatchWGs);   // flag boundary
     computeBarrier();
-    dispatchPass(5, pc, edgeDispatchWGs);   // cost + scatter
+    dispatchPass(5, pc, triDispatchWGs);    // quadrics + init descriptors
     computeBarrier();
-    dispatchPass(6, pc, edgeDispatchWGs);   // collapse
+    dispatchPass(6, pc, edgeDispatchWGs);   // cost + scatter
     computeBarrier();
-    dispatchPass(7, pc, triDispatchWGs);    // mark degenerate
+    dispatchPass(7, pc, edgeDispatchWGs);   // collapse
     computeBarrier();
-    dispatchPass(8, pc, triDispatchWGs);    // compact
+    dispatchPass(8, pc, triDispatchWGs);    // mark degenerate
     computeBarrier();
-    dispatchPass(9, pc, triDispatchWGs);    // copyback
+    dispatchPass(9, pc, triDispatchWGs);    // compact
+    computeBarrier();
+    dispatchPass(10, pc, triDispatchWGs);   // copyback
     computeBarrier();
 
     vkEndCommandBuffer(computeCommandBuffer);

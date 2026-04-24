@@ -253,7 +253,7 @@ private:
     VkQueryPool timestampQueryPool = VK_NULL_HANDLE;
     float timestampPeriodNs = 1.0f;
 
-    static constexpr uint32_t DECIMATION_PASS_COUNT = 10;
+    static constexpr uint32_t DECIMATION_PASS_COUNT = 11;
     VkPipeline decimationPipelines[DECIMATION_PASS_COUNT] = {};
     VkPipelineLayout decimationPipelineLayout = VK_NULL_HANDLE;
     VkDescriptorSetLayout decimationDescSetLayout0 = VK_NULL_HANDLE;

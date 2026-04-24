@@ -34,7 +34,7 @@ void main() {
 
     for (uint k = 0u; k < 3u; k++) {
         uint vertIdx = posIndices[baseIdx + k];
-        uint pos = atomicAdd(triEdges[vertIdx], 1u);
+        uint pos = atomicAdd(valence[vertIdx], 1u);
         triAdjNext[pos] = ADJ_PACK(gid, k);
     }
 }

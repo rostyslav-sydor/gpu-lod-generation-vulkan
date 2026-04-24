@@ -48,9 +48,9 @@ layout(set = 0, binding = 7) buffer EdgeTriBuffer {
     uint edgeTriangles[];  // [edgeIdx*2+0] = tri0, [edgeIdx*2+1] = tri1
 };
 
-// B8: Reserved (unused after linked-list revert)
-layout(set = 0, binding = 8) buffer ReservedBuffer8 {
-    uint triEdges[];
+// B8: Per-vertex valence (triangle count). Built in Pass 3, read in Pass 6.
+layout(set = 0, binding = 8) buffer ValenceBuffer {
+    uint valence[];
 };
 
 // B9: Per-vertex quadric — 11 ints per vertex (fixed-point for atomic accumulation)

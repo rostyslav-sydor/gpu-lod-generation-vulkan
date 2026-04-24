@@ -346,7 +346,8 @@ void App::createDecimationPipelines() {
     const std::string shaderDir = "shaders2/mesh_decimation/";
     const std::string shaderNames[DECIMATION_PASS_COUNT] = {
         "01_hash_vertices", "02_dedup_indices", "03_build_adjacency",
-        "04_build_edges", "05_compute_quadrics", "06_compute_cost_and_scatter",
+        "04_build_edges", "04b_flag_boundary",
+        "05_compute_quadrics", "06_compute_cost_and_scatter",
         "09_collapse_edges",
         "10_mark_degenerate", "11_compact", "12_copy_back"
     };
