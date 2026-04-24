@@ -1131,6 +1131,17 @@ void App::runDecimation() {
 
     // Copy final counters to host-visible readback buffer
     if (decimationUseDeviceLocal) {
+        // Ensure all writes to counter buffer (from compute shaders and transfers)
+        // are visible before the copy
+        {
+            VkMemoryBarrier barrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+            barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
+            barrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+            vkCmdPipelineBarrier(cmd,
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT,
+                VK_PIPELINE_STAGE_TRANSFER_BIT,
+                0, 1, &barrier, 0, nullptr, 0, nullptr);
+        }
         VkBufferCopy region{};
         region.size = 256;
         vkCmdCopyBuffer(cmd, decimationBufs[DB_COUNTER], counterReadbackBuf, 1, &region);
@@ -1276,6 +1287,10 @@ void App::runDecimation() {
 
     // Read back indices
     {
+        if (triCount == 0) {
+            std::cerr << "WARNING: triCount readback is 0 — counter sync issue?\n";
+            triCount = 1;
+        }
         VkDeviceSize idxBufSize = (VkDeviceSize)triCount * 3 * sizeof(uint32_t);
         indices.resize(triCount * 3);
         if (decimationUseDeviceLocal) {
