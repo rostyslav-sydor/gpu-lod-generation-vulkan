@@ -142,12 +142,21 @@ void main() {
     uint v0 = edge.x;
     uint v1 = edge.y;
 
-    // Light iterations: only 1-ring dirty edges recompute + scatter.
-    // Clean edges keep their descriptors in triDescriptor[] from the last full
-    // iteration (pass 5 only clears triangles that reference dirty edges).
+    // Light iterations: only recompute cost for 1-ring dirty edges (topology changed).
+    // All other edges re-scatter their cached cost — cheap but keeps triDescriptor
+    // fully populated so the pass 9 independent-set check sees no stale gaps.
     if (lightIteration != 0u) {
         bool dirty1 = (posMap[v0] == iteration) || (posMap[v1] == iteration);
-        if (!dirty1) return;
+        if (!dirty1) {
+            float prevCost = edgeCost[gid];
+            if (prevCost >= 1e30 || (edgeFlags[gid] & EDGE_ELIGIBLE) == 0u) return;
+            if (((vertexFlags[v0] | vertexFlags[v1]) & FLAG_COLLAPSED) != 0u) return;
+            uint costBits = quantizeCostBits(prevCost, costQuantBits);
+            uint64_t descriptor = (uint64_t(costBits) << 32) | uint64_t(gid);
+            scatterToAdjacentTris(v0, descriptor);
+            scatterToAdjacentTris(v1, descriptor);
+            return;
+        }
     }
 
     uint flags0 = vertexFlags[v0];

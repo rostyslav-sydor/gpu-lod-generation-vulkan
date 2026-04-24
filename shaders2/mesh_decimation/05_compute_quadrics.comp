@@ -140,36 +140,10 @@ void main() {
     }
 
     // --- Initialize triangle descriptor for atomic-min scatter (fused P7) ---
-    if (gid < actualTriCount && lightIteration == 0u) {
+    // Clear ALL descriptors every iteration. On light iterations, clean edges
+    // re-scatter their cached costs (cheap) so every triangle gets a valid
+    // descriptor for the pass 9 independent-set check.
+    if (gid < actualTriCount) {
         triDescriptor[gid] = 0xFFFFFFFFFFFFFFFFul;
-    }
-
-    // Light iterations: targeted clearing.
-    // (a) Triangles with a 1-ring dirty vertex had topology changes (replaceInAdjacent).
-    // (b) Triangles whose winning descriptor references a 1-ring dirty edge — that
-    //     edge will recompute a different cost, so the cached descriptor is stale
-    //     and would block the edge's own new descriptor via atomicMin.
-    // Everything else keeps its valid descriptor; clean edges skip pass 6 entirely
-    // but can still collapse in pass 9 using their preserved descriptors.
-    if (valid && lightIteration != 0u) {
-        bool needsClear = false;
-
-        bool d0 = (posMap[i0] == iteration);
-        bool d1 = (posMap[i1] == iteration);
-        bool d2 = (posMap[i2] == iteration);
-        needsClear = d0 || d1 || d2;
-
-        if (!needsClear) {
-            uint64_t desc = triDescriptor[gid];
-            if (desc != 0xFFFFFFFFFFFFFFFFul) {
-                uint edgeId = uint(desc & 0xFFFFFFFFul);
-                uvec2 e = edges[edgeId];
-                needsClear = (posMap[e.x] == iteration) || (posMap[e.y] == iteration);
-            }
-        }
-
-        if (needsClear) {
-            triDescriptor[gid] = 0xFFFFFFFFFFFFFFFFul;
-        }
     }
 }
