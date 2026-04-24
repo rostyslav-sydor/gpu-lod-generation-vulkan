@@ -900,7 +900,13 @@ void App::runDecimation() {
         if (vkQueueSubmit(computeQueue, 1, &submitInfo, computeFence) != VK_SUCCESS) {
             throw std::runtime_error("failed to submit decimation command buffer!");
         }
-        vkWaitForFences(device, 1, &computeFence, VK_TRUE, UINT64_MAX);
+        VkResult fenceResult = vkWaitForFences(device, 1, &computeFence, VK_TRUE, 5000000000ULL); // 5s timeout
+        if (fenceResult == VK_TIMEOUT) {
+            std::cerr << "ERROR: GPU hung (fence timeout after 5s)!\n";
+            vkDeviceWaitIdle(device);
+        } else if (fenceResult == VK_ERROR_DEVICE_LOST) {
+            std::cerr << "ERROR: GPU device lost!\n";
+        }
     };
 
     // --- Helper: begin command buffer ---
@@ -1009,13 +1015,6 @@ void App::runDecimation() {
     Timer gpuTimer;
     VkCommandBuffer cmd = beginCmd();
 
-    // Initialize COUNTER_TRIANGLE_COUNT on GPU
-    {
-        uint32_t initVal = triCount;
-        vkCmdUpdateBuffer(cmd, decimationBufs[DB_COUNTER],
-            2 * sizeof(uint32_t), sizeof(uint32_t), &initVal);
-    }
-
     vkCmdResetQueryPool(cmd, timestampQueryPool, 0, 2);
     vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, timestampQueryPool, 0);
 
@@ -1024,6 +1023,11 @@ void App::runDecimation() {
     }
 
     const uint32_t fullRebuildFreq = decimationFullRebuildFreq;
+    const bool debugSync = (std::getenv("DECIM_DEBUG") && std::string(std::getenv("DECIM_DEBUG")) != "0");
+
+    if (debugSync) {
+        std::cout << "  [DEBUG] Per-pass sync mode enabled\n";
+    }
 
     for (uint32_t iteration = 0; iteration < maxDecimationIterations; iteration++) {
         bool isLight = (iteration > 0) && (iteration % fullRebuildFreq != 0);
@@ -1040,8 +1044,70 @@ void App::runDecimation() {
         pc.targetTriCount = std::max(1u, (uint32_t)(triCount * decimationTargetRatio));
         pc.lightIteration = isLight ? 1u : 0u;
 
+        if (debugSync) {
+            // Per-pass debug mode: submit each pass individually to find GPU hangs
+            const char* passNames[] = {
+                "P3:adjacency", "P4:edges", "P4b:boundary",
+                "P5:quadrics", "P6:cost+scatter", "P7:collapse",
+                "P8:mark_degen", "P9:compact", "P10:copyback"
+            };
+            struct PassInfo { uint32_t pipeIdx; uint32_t wgs; bool skipIfLight; };
+            PassInfo passes[] = {
+                {2, triDispatchWGs, false},   // P3
+                {3, triDispatchWGs, true},    // P4
+                {4, edgeDispatchWGs, true},   // P4b
+                {5, triDispatchWGs, false},   // P5
+                {6, edgeDispatchWGs, false},  // P6
+                {7, edgeDispatchWGs, false},  // P7 (collapse)
+                {8, triDispatchWGs, false},   // P8 (mark degen)
+                {9, triDispatchWGs, true},    // P9 (compact)
+                {10, triDispatchWGs, true},   // P10 (copyback)
+            };
+
+            // Fills in their own submission
+            submitAndWait(cmd);
+            cmd = beginCmd();
+            if (isLight) {
+                vkCmdFillBuffer(cmd, decimationBufs[DB_COUNTER], 4, 4, 0);
+                vkCmdFillBuffer(cmd, decimationBufs[DB_COUNTER], 12, 8, 0);
+            } else {
+                vkCmdFillBuffer(cmd, decimationBufs[DB_COUNTER], 0, 8, 0);
+                vkCmdFillBuffer(cmd, decimationBufs[DB_COUNTER], 12, 8, 0);
+                vkCmdFillBuffer(cmd, decimationBufs[DB_HASHMAP_EDGE], 0, edgeHashMapSize, 0xFFFFFFFF);
+            }
+            vkCmdFillBuffer(cmd, decimationBufs[DB_ADJ_HEAD], 0, decimationBufSizes[DB_ADJ_HEAD], 0xFFFFFFFF);
+            vkCmdFillBuffer(cmd, decimationBufs[DB_TRI_EDGE], 0, decimationBufSizes[DB_TRI_EDGE], 0);
+            vkCmdFillBuffer(cmd, decimationBufs[DB_QUADRIC], 0, decimationBufSizes[DB_QUADRIC], 0);
+            if (iteration == 0) {
+                uint32_t initVal = triCount;
+                vkCmdUpdateBuffer(cmd, decimationBufs[DB_COUNTER],
+                    2 * sizeof(uint32_t), sizeof(uint32_t), &initVal);
+            }
+            submitAndWait(cmd);
+
+            for (int p = 0; p < 9; p++) {
+                if (passes[p].skipIfLight && isLight) continue;
+                std::cerr << "  [DEBUG] iter=" << iteration << " " << passNames[p] << " ..." << std::flush;
+                cmd = beginCmd();
+                transferToComputeBarrier(cmd);
+                dispatchPass(cmd, passes[p].pipeIdx, pc, passes[p].wgs);
+                computeBarrier(cmd);
+                submitAndWait(cmd);
+                std::cerr << " ok\n";
+            }
+
+            if (!isLight) {
+                cmd = beginCmd();
+                vkCmdFillBuffer(cmd, decimationBufs[DB_ALIVE], 0, decimationBufSizes[DB_ALIVE], 1);
+                submitAndWait(cmd);
+            }
+
+            cmd = beginCmd();
+            continue;
+        }
+
+        // Normal (batched) path
         if (isLight) {
-            // Light iteration: preserve COUNTER_EDGE_COUNT (slot 0), clear others
             vkCmdFillBuffer(cmd, decimationBufs[DB_COUNTER], 4, 4, 0);   // COLLAPSE_COUNT
             vkCmdFillBuffer(cmd, decimationBufs[DB_COUNTER], 12, 8, 0);  // VERTEX_COUNT, COMPACT_COUNT
         } else {
@@ -1053,6 +1119,15 @@ void App::runDecimation() {
         vkCmdFillBuffer(cmd, decimationBufs[DB_ADJ_HEAD], 0, decimationBufSizes[DB_ADJ_HEAD], 0xFFFFFFFF);
         vkCmdFillBuffer(cmd, decimationBufs[DB_TRI_EDGE], 0, decimationBufSizes[DB_TRI_EDGE], 0);  // valence
         vkCmdFillBuffer(cmd, decimationBufs[DB_QUADRIC], 0, decimationBufSizes[DB_QUADRIC], 0);
+
+        // Initialize COUNTER_TRIANGLE_COUNT on first iteration (AFTER fills to avoid
+        // cache coherency issues where adjacent fills invalidate this value on some drivers)
+        if (iteration == 0) {
+            uint32_t initVal = triCount;
+            vkCmdUpdateBuffer(cmd, decimationBufs[DB_COUNTER],
+                2 * sizeof(uint32_t), sizeof(uint32_t), &initVal);
+        }
+
         transferToComputeBarrier(cmd);
 
         uint32_t tsBase = iteration * TS_PER_ITER;
@@ -1157,13 +1232,14 @@ void App::runDecimation() {
     long long totalUs = gpuTimer.getTime();
     triCount = readCounter(2);
 
-    // Read GPU time
+    // Read GPU time (don't use WAIT_BIT — if device was lost, it would hang)
     double totalGpuMs = 0;
     {
-        uint64_t ts[2];
-        vkGetQueryPoolResults(device, timestampQueryPool, 0, 2, sizeof(ts), ts,
-            sizeof(uint64_t), VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT);
-        totalGpuMs = (double)(ts[1] - ts[0]) * timestampPeriodNs * 1e-6;
+        uint64_t ts[2] = {0, 0};
+        VkResult qr = vkGetQueryPoolResults(device, timestampQueryPool, 0, 2, sizeof(ts), ts,
+            sizeof(uint64_t), VK_QUERY_RESULT_64_BIT);
+        if (qr == VK_SUCCESS && ts[1] > ts[0])
+            totalGpuMs = (double)(ts[1] - ts[0]) * timestampPeriodNs * 1e-6;
     }
 
     // Read per-iteration stats (only when logging)
