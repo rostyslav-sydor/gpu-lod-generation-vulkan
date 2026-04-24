@@ -86,6 +86,7 @@ if [ "$EXPERIMENT" = "all" ] || [ "$EXPERIMENT" = "1" ]; then
                     DECIM_LIGHT=$freq \
                     DECIM_LOG=1 \
                     CPU_DECIM=0 \
+                    HEADLESS=1 \
                     $BINARY
         done
     done
@@ -119,6 +120,7 @@ if [ "$EXPERIMENT" = "all" ] || [ "$EXPERIMENT" = "2" ]; then
                         DECIM_LIGHT=$FREQ \
                         DECIM_LOG=1 \
                         CPU_DECIM=0 \
+                        HEADLESS=1 \
                         $BINARY
             done
             # CPU baseline (meshoptimizer)
@@ -129,6 +131,7 @@ if [ "$EXPERIMENT" = "all" ] || [ "$EXPERIMENT" = "2" ]; then
                     DECIM_NUM=0 \
                     DECIM_LOG=1 \
                     CPU_DECIM=1 \
+                    HEADLESS=1 \
                     $BINARY
         done
     done
@@ -163,6 +166,7 @@ if [ "$EXPERIMENT" = "all" ] || [ "$EXPERIMENT" = "3" ]; then
                 DECIM_LIGHT=$FREQ \
                 DECIM_LOG=1 \
                 CPU_DECIM=0 \
+                HEADLESS=1 \
                 $BINARY
 
         # CPU
@@ -173,6 +177,7 @@ if [ "$EXPERIMENT" = "all" ] || [ "$EXPERIMENT" = "3" ]; then
                 DECIM_NUM=0 \
                 DECIM_LOG=1 \
                 CPU_DECIM=1 \
+                HEADLESS=1 \
                 $BINARY
     done
 fi
