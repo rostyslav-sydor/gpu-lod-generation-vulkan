@@ -45,13 +45,12 @@ bool checkVertex(uint vertIdx, uint64_t descriptor) {
     return true;
 }
 
-void markDirtyRing(uint vertIdx, uint dirtyGen, bool clearDescriptors) {
+void markDirtyRing(uint vertIdx, uint dirtyGen) {
     posMap[vertIdx] = dirtyGen;
     uint idx = adjHead[vertIdx];
     while (idx != NONE) {
         uint triIdx = idx / 3u;
-        if (clearDescriptors)
-            triDescriptor[triIdx] = 0xFFFFFFFFFFFFFFFFul;
+        triDescriptor[triIdx] = 0xFFFFFFFFFFFFFFFFul;
         uint base = triIdx * 3u;
         for (uint k = 0u; k < 3u; k++)
             posMap[posIndices[base + k]] = dirtyGen;
@@ -115,11 +114,9 @@ void main() {
     atomicOr(vertexFlags[v1], FLAG_COLLAPSED);
 
     // Mark 1-ring of both endpoints dirty for next iteration's pass 6
-    // On light iterations, also clear triDescriptor to remove ghost descriptors
     uint dirtyGen = iteration + 1u;
-    bool clearDesc = (lightIteration != 0u);
-    markDirtyRing(v0, dirtyGen, clearDesc);
-    markDirtyRing(v1, dirtyGen, clearDesc);
+    markDirtyRing(v0, dirtyGen);
+    markDirtyRing(v1, dirtyGen);
 
     // Increment collapse counter
     atomicAdd(counters[COUNTER_COLLAPSE_COUNT], 1u);
