@@ -5,28 +5,24 @@ SOURCES := $(wildcard src/*.cpp)
 HEADERS := $(wildcard include/*.hpp)
 
 DECIMATION_DIR = shaders2/mesh_decimation
-DECIMATION_COMPS = $(sort $(wildcard $(DECIMATION_DIR)/*.comp))
+DECIMATION_COMPS = $(sort $(wildcard $(DECIMATION_DIR)/*.comp) $(wildcard shaders/*.comp))
 DECIMATION_SPVS = $(DECIMATION_COMPS:.comp=.spv)
 
 .DEFAULT_GOAL := build
-.PHONY: build test clean recomp_shaders recomp_decimation_shaders
+.PHONY: build test clean recomp_decimation_shaders
 
-build: recomp_shaders recomp_decimation_shaders VulkanLOD
+build: recomp_decimation_shaders VulkanLOD
 
 VulkanLOD: $(SOURCES) $(HEADERS)
 	g++ $(CFLAGS) -o VulkanLOD $(SOURCES) $(LDFLAGS) -Wl,-rpath,/usr/local/lib
 
-recomp_shaders:
-	glslc -fshader-stage=comp $(SHADER_DBG_FLAGS) shaders/simpify.glsl -o shaders/comp.spv
-	glslc -fshader-stage=vert $(SHADER_DBG_FLAGS) shaders/vertex.glsl -c -o shaders/vert.spv
-	glslc -fshader-stage=frag $(SHADER_DBG_FLAGS) shaders/fragment.glsl -o shaders/frag.spv
 
 $(DECIMATION_DIR)/%.spv: $(DECIMATION_DIR)/%.comp $(DECIMATION_DIR)/common.glsl $(DECIMATION_DIR)/bindings.glsl
 	glslc -fshader-stage=comp --target-env=vulkan1.4 -I $(DECIMATION_DIR) $(SHADER_DBG_FLAGS) $< -o $@
 
 recomp_decimation_shaders: $(DECIMATION_SPVS)
 
-all: recomp_shaders recomp_decimation_shaders VulkanLOD test
+all: recomp_decimation_shaders VulkanLOD test
 
 test: VulkanLOD
 	VK_LAYER_PRINTF_BUFFER_SIZE=8192 ./VulkanLOD
