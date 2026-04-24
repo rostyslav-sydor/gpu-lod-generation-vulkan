@@ -1015,6 +1015,13 @@ void App::runDecimation() {
     Timer gpuTimer;
     VkCommandBuffer cmd = beginCmd();
 
+    // Initialize COUNTER_TRIANGLE_COUNT before the loop (needed for DECIM_NUM=0 readback)
+    {
+        uint32_t initVal = triCount;
+        vkCmdUpdateBuffer(cmd, decimationBufs[DB_COUNTER],
+            2 * sizeof(uint32_t), sizeof(uint32_t), &initVal);
+    }
+
     vkCmdResetQueryPool(cmd, timestampQueryPool, 0, 2);
     vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, timestampQueryPool, 0);
 
@@ -1364,7 +1371,7 @@ void App::runDecimation() {
     // Read back indices
     {
         if (triCount == 0) {
-            std::cerr << "WARNING: triCount readback is 0 — counter sync issue?\n";
+            std::cerr << "WARNING: triCount readback is 0 - counter sync issue?\n";
             triCount = 1;
         }
         VkDeviceSize idxBufSize = (VkDeviceSize)triCount * 3 * sizeof(uint32_t);
