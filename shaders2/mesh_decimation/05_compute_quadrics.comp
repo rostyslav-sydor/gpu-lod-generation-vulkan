@@ -85,7 +85,7 @@ void main() {
     uint tid = gl_LocalInvocationID.x;
     uint gid = gl_GlobalInvocationID.x;
 
-    bool fullQuadricBuild = (costMode == COST_MODE_QEM && iteration == 0u);
+    bool fullQuadricBuild = (costMode == COST_MODE_QEM);
 
     if (fullQuadricBuild) {
         for (uint t = tid; t < SMAP_SIZE; t += WORKGROUP_SIZE)
