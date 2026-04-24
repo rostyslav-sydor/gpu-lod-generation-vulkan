@@ -50,6 +50,7 @@ void markDirtyRing(uint vertIdx, uint dirtyGen) {
     uint idx = adjHead[vertIdx];
     while (idx != NONE) {
         uint triIdx = idx / 3u;
+        triDescriptor[triIdx] = 0xFFFFFFFFFFFFFFFFul;
         uint base = triIdx * 3u;
         for (uint k = 0u; k < 3u; k++)
             posMap[posIndices[base + k]] = dirtyGen;

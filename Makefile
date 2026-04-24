@@ -5,7 +5,7 @@ SOURCES := $(wildcard src/*.cpp)
 HEADERS := $(wildcard include/*.hpp)
 
 DECIMATION_DIR = shaders2/mesh_decimation
-DECIMATION_COMPS = $(sort $(wildcard $(DECIMATION_DIR)/*.comp) $(wildcard shaders/*.comp))
+DECIMATION_COMPS = $(sort $(wildcard $(DECIMATION_DIR)/*.comp))
 DECIMATION_SPVS = $(DECIMATION_COMPS:.comp=.spv)
 
 .DEFAULT_GOAL := build

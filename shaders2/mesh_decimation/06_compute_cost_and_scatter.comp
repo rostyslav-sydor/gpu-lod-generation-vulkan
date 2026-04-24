@@ -142,23 +142,10 @@ void main() {
     uint v0 = edge.x;
     uint v1 = edge.y;
 
-    // Light iterations: reuse previous cost for clean edges (neither endpoint dirty)
+    // Light iterations: clean edges early-exit (their descriptors persist from last iteration)
     if (lightIteration != 0u) {
         bool dirty = (posMap[v0] == iteration) || (posMap[v1] == iteration);
-        if (!dirty) {
-            float prevCost = edgeCost[gid];
-            if (prevCost >= 1e30 || (edgeFlags[gid] & EDGE_ELIGIBLE) == 0u) return;
-            if (((vertexFlags[v0] | vertexFlags[v1]) & FLAG_COLLAPSED) != 0u) {
-                edgeCost[gid] = 1e30;
-                edgeFlags[gid] = 0u;
-                return;
-            }
-            uint costBits = quantizeCostBits(prevCost, costQuantBits);
-            uint64_t descriptor = (uint64_t(costBits) << 32) | uint64_t(gid);
-            scatterToAdjacentTris(v0, descriptor);
-            scatterToAdjacentTris(v1, descriptor);
-            return;
-        }
+        if (!dirty) return;
     }
 
     uint flags0 = vertexFlags[v0];
@@ -207,7 +194,7 @@ void main() {
 
         const float curvatureWeight = 10.0;
         cost = edgeLen * (1.0 + curvatureWeight * maxCurv) * costPenalty;
-        optPos = (curv0 <= curv1) ? vert0.pos : vert1.pos;
+        optPos = (curv0 >= curv1) ? vert0.pos : vert1.pos;
     }
     else {
         cost = edgeLen * costPenalty;
