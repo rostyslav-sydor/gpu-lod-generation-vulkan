@@ -140,10 +140,23 @@ void main() {
     }
 
     // --- Initialize triangle descriptor for atomic-min scatter (fused P7) ---
-    // Clear ALL descriptors every iteration. On light iterations, clean edges
-    // re-scatter their cached costs (cheap) so every triangle gets a valid
-    // descriptor for the pass 9 independent-set check.
-    if (gid < actualTriCount) {
+    if (gid < actualTriCount && lightIteration == 0u) {
         triDescriptor[gid] = 0xFFFFFFFFFFFFFFFFul;
+    }
+
+    // --- 2-ring dirty expansion (light iterations only) ---
+    // If any vertex of this alive triangle is 1-ring dirty (posMap == iteration),
+    // clear triDescriptor and mark non-dirty vertices as 2-ring (high bit).
+    if (valid && lightIteration != 0u) {
+        bool d0 = (posMap[i0] == iteration);
+        bool d1 = (posMap[i1] == iteration);
+        bool d2 = (posMap[i2] == iteration);
+        if (d0 || d1 || d2) {
+            triDescriptor[gid] = 0xFFFFFFFFFFFFFFFFul;
+            uint ring2 = iteration | 0x80000000u;
+            if (!d0 && posMap[i0] != iteration) posMap[i0] = ring2;
+            if (!d1 && posMap[i1] != iteration) posMap[i1] = ring2;
+            if (!d2 && posMap[i2] != iteration) posMap[i2] = ring2;
+        }
     }
 }
