@@ -399,7 +399,7 @@ void App::allocateDecimationBuffers(uint32_t vertCount, uint32_t triCount) {
     decimationBufSizes[DB_EDGE_COST]      = (VkDeviceSize)maxEdges * sizeof(float);
     decimationBufSizes[DB_EDGE_FLAG]      = (VkDeviceSize)maxEdges * sizeof(uint32_t);
     decimationBufSizes[DB_EDGE_TARGET]    = (VkDeviceSize)maxEdges * 3 * sizeof(float) * 4;
-    decimationBufSizes[DB_TRI_DESCRIPTOR] = (VkDeviceSize)triCount * sizeof(uint64_t);
+    decimationBufSizes[DB_TRI_DESCRIPTOR] = (VkDeviceSize)triCount * 2 * sizeof(uint32_t);
     decimationBufSizes[DB_HASHMAP_EDGE]   = (VkDeviceSize)hashMapSize * 4 * sizeof(uint32_t);
     decimationBufSizes[DB_HASHMAP_VERTEX] = (VkDeviceSize)hashMapSize * 4 * sizeof(uint32_t);
     decimationBufSizes[DB_HASHMAP_POSITION] = (VkDeviceSize)hashMapSize * 4 * sizeof(uint32_t);

@@ -1,5 +1,4 @@
 #version 460
-#extension GL_EXT_shader_atomic_int64 : require
 
 // ============================================================================
 // Pass 6 (fused): Compute Edge Cost + Scatter to Triangle Descriptors
@@ -122,11 +121,14 @@ vec3 getTriNormal(uint triIdx) {
     return cross(b - a, c - a);
 }
 
-void scatterToAdjacentTris(uint vertIdx, uint64_t descriptor) {
+void scatterToAdjacentTris(uint vertIdx, uint costBits, uint edgeIdx) {
     uint idx = adjHead[vertIdx];
     while (idx != NONE) {
         uint triIdx = idx / 3u;
-        atomicMin(triDescriptor[triIdx], descriptor);
+        uint base = triIdx * 2u;
+        atomicMin(triDescriptor[base + 0u], costBits);
+        if (triDescriptor[base + 0u] == costBits)
+            atomicMin(triDescriptor[base + 1u], edgeIdx);
         idx = triAdjNext[idx];
     }
 }
@@ -135,9 +137,6 @@ void main() {
     uint gid = gl_GlobalInvocationID.x;
     uint actualEdgeCount = counters[COUNTER_EDGE_COUNT];
     if (gid >= actualEdgeCount) return;
-
-    // BISECT: move this return down to find what hangs. Remove when done.
-    return;
 
     if (counters[COUNTER_TRIANGLE_COUNT] <= targetTriCount) return;
 
@@ -157,9 +156,8 @@ void main() {
                 return;
             }
             uint costBits = quantizeCostBits(prevCost, costQuantBits);
-            uint64_t descriptor = (uint64_t(costBits) << 32) | uint64_t(gid);
-            scatterToAdjacentTris(v0, descriptor);
-            scatterToAdjacentTris(v1, descriptor);
+            scatterToAdjacentTris(v0, costBits, gid);
+            scatterToAdjacentTris(v1, costBits, gid);
             return;
         }
     }
@@ -242,8 +240,7 @@ void main() {
     if (((flags0 | flags1) & FLAG_COLLAPSED) != 0u) return;
 
     uint costBits = quantizeCostBits(cost, costQuantBits);
-    uint64_t descriptor = (uint64_t(costBits) << 32) | uint64_t(gid);
 
-    scatterToAdjacentTris(v0, descriptor);
-    scatterToAdjacentTris(v1, descriptor);
+    scatterToAdjacentTris(v0, costBits, gid);
+    scatterToAdjacentTris(v1, costBits, gid);
 }

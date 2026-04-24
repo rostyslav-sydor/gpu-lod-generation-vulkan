@@ -76,9 +76,11 @@ layout(set = 0, binding = 12) buffer EdgeTargetBuffer {
     vec4 edgeTarget[];   // [edgeIdx*3+0]=pos, [edgeIdx*3+1]=normal, [edgeIdx*3+2]=texcoord
 };
 
-// B13: Per-triangle 64-bit edge descriptor for atomic-min race
+// B13: Per-triangle edge descriptor for atomic-min race (2 uints per triangle)
+//   [triIdx*2+0] = quantized cost bits (atomicMin)
+//   [triIdx*2+1] = edge index           (atomicMin for tiebreaking)
 layout(set = 0, binding = 13) buffer TriDescriptorBuffer {
-    uint64_t triDescriptor[];
+    uint triDescriptor[];
 };
 
 // B14: Edge hash map — open addressing table (used by Pass 4)
