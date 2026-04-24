@@ -32,14 +32,11 @@
 
 layout(local_size_x = WORKGROUP_SIZE) in;
 
-void updateVertex(uint vertIdx, uint costBits, uint edgeIdx) {
+void updateVertex(uint vertIdx, uint descriptor) {
     uint idx = adjHead[vertIdx];
     while (idx != NONE) {
         uint triIdx = idx / 3u;
-        uint base = triIdx * 2u;
-        atomicMin(triDescriptor[base + 0u], costBits);
-        if (triDescriptor[base + 0u] == costBits)
-            atomicMin(triDescriptor[base + 1u], edgeIdx);
+        atomicMin(triDescriptor[triIdx], descriptor);
         idx = triAdjNext[idx];
     }
 }
@@ -55,8 +52,8 @@ void main() {
     if (((vertexFlags[edge.x] | vertexFlags[edge.y]) & FLAG_COLLAPSED) != 0u) return;
 
     float cost = edgeCost[gid];
-    uint costBits = quantizeCostBits(cost, costQuantBits);
+    uint descriptor = quantizeCostBits(cost, costQuantBits) | gid;
 
-    updateVertex(edge.x, costBits, gid);
-    updateVertex(edge.y, costBits, gid);
+    updateVertex(edge.x, descriptor);
+    updateVertex(edge.y, descriptor);
 }

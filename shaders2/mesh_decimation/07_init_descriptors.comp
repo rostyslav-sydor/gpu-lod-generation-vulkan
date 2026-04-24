@@ -23,6 +23,5 @@ void main() {
     uint gid = gl_GlobalInvocationID.x;
     if (gid >= triangleCount) return;
 
-    triDescriptor[gid * 2u + 0u] = 0xFFFFFFFFu;
-    triDescriptor[gid * 2u + 1u] = 0xFFFFFFFFu;
+    triDescriptor[gid] = 0xFFFFFFFFu;
 }

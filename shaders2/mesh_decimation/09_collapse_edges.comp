@@ -33,12 +33,11 @@
 
 layout(local_size_x = WORKGROUP_SIZE) in;
 
-bool checkVertex(uint vertIdx, uint costBits, uint edgeIdx) {
+bool checkVertex(uint vertIdx, uint descriptor) {
     uint idx = adjHead[vertIdx];
     while (idx != NONE) {
         uint triIdx = idx / 3u;
-        uint base = triIdx * 2u;
-        if (triDescriptor[base + 0u] != costBits || triDescriptor[base + 1u] != edgeIdx)
+        if (triDescriptor[triIdx] != descriptor)
             return false;
         idx = triAdjNext[idx];
     }
@@ -84,11 +83,11 @@ void main() {
     if (((vertexFlags[v0] | vertexFlags[v1]) & FLAG_COLLAPSED) != 0u) return;
 
     float cost = edgeCost[gid];
-    uint costBits = quantizeCostBits(cost, costQuantBits);
+    uint descriptor = quantizeCostBits(cost, costQuantBits) | gid;
 
     // Check if we won the race for ALL adjacent triangles of BOTH vertices
-    bool wonV0 = checkVertex(v0, costBits, gid);
-    bool wonV1 = checkVertex(v1, costBits, gid);
+    bool wonV0 = checkVertex(v0, descriptor);
+    bool wonV1 = checkVertex(v1, descriptor);
 
     if (!wonV0 || !wonV1) return;
 

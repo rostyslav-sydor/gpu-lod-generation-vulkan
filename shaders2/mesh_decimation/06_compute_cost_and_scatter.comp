@@ -121,14 +121,11 @@ vec3 getTriNormal(uint triIdx) {
     return cross(b - a, c - a);
 }
 
-void scatterToAdjacentTris(uint vertIdx, uint costBits, uint edgeIdx) {
+void scatterToAdjacentTris(uint vertIdx, uint descriptor) {
     uint idx = adjHead[vertIdx];
     while (idx != NONE) {
         uint triIdx = idx / 3u;
-        uint base = triIdx * 2u;
-        atomicMin(triDescriptor[base + 0u], costBits);
-        if (triDescriptor[base + 0u] == costBits)
-            atomicMin(triDescriptor[base + 1u], edgeIdx);
+        atomicMin(triDescriptor[triIdx], descriptor);
         idx = triAdjNext[idx];
     }
 }
@@ -155,9 +152,9 @@ void main() {
                 edgeFlags[gid] = 0u;
                 return;
             }
-            uint costBits = quantizeCostBits(prevCost, costQuantBits);
-            scatterToAdjacentTris(v0, costBits, gid);
-            scatterToAdjacentTris(v1, costBits, gid);
+            uint descriptor = quantizeCostBits(prevCost, costQuantBits) | gid;
+            scatterToAdjacentTris(v0, descriptor);
+            scatterToAdjacentTris(v1, descriptor);
             return;
         }
     }
@@ -239,8 +236,8 @@ void main() {
     // --- Fused scatter: atomicMin to all adjacent triangles of both endpoints ---
     if (((flags0 | flags1) & FLAG_COLLAPSED) != 0u) return;
 
-    uint costBits = quantizeCostBits(cost, costQuantBits);
+    uint descriptor = quantizeCostBits(cost, costQuantBits) | gid;
 
-    scatterToAdjacentTris(v0, costBits, gid);
-    scatterToAdjacentTris(v1, costBits, gid);
+    scatterToAdjacentTris(v0, descriptor);
+    scatterToAdjacentTris(v1, descriptor);
 }

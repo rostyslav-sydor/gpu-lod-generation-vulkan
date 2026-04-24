@@ -774,6 +774,11 @@ void App::runDecimation() {
     uint32_t originalTriCount = triCount;
     uint32_t maxEdges = triCount * 3;
 
+    // Compute edge index bits needed for 32-bit packed descriptor (cost | edgeIdx)
+    uint32_t edgeBits = 0;
+    for (uint32_t tmp = maxEdges; tmp > 0; tmp >>= 1) edgeBits++;
+    decimationCostQuantBits = (edgeBits < 23) ? (23 - edgeBits) : 0;
+
     auto np2 = [](uint32_t v) { v--; v|=v>>1; v|=v>>2; v|=v>>4; v|=v>>8; v|=v>>16; v++; return v; };
     uint32_t hashMapSize = np2(std::max(vertCount, maxEdges) * 2);
 
@@ -1631,6 +1636,10 @@ void App::initInteractiveDecimation() {
     interactiveOrigTriCount = interactiveTriCount;
     interactiveMaxEdges = interactiveTriCount * 3;
     interactiveIteration = 0;
+
+    uint32_t edgeBitsI = 0;
+    for (uint32_t tmp = interactiveMaxEdges; tmp > 0; tmp >>= 1) edgeBitsI++;
+    decimationCostQuantBits = (edgeBitsI < 23) ? (23 - edgeBitsI) : 0;
 
     auto np2 = [](uint32_t v) { v--; v|=v>>1; v|=v>>2; v|=v>>4; v|=v>>8; v|=v>>16; v++; return v; };
     interactiveHashMapSize = np2(std::max(interactiveVertCount, interactiveMaxEdges) * 2);
