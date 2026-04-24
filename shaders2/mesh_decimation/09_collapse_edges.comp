@@ -74,6 +74,7 @@ void main() {
     uint gid = gl_GlobalInvocationID.x;
     uint actualEdgeCount = counters[COUNTER_EDGE_COUNT];
     if (gid >= actualEdgeCount) return;
+    if (counters[COUNTER_TRIANGLE_COUNT] <= targetTriCount) return;
 
     if ((edgeFlags[gid] & EDGE_ELIGIBLE) == 0u) return;
 

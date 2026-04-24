@@ -668,9 +668,11 @@ void App::printDecimationMetrics() {
         std::cout << "  Keys: [G]PU  [C]PU  [O]riginal\n\n";
 
     // ======================================================================
-    // Write CSV logs (only with DECIM_LOG=1)
+    // Write CSV logs
+    // decim_runs.csv: always written (summary + quality metrics)
+    // decim_iterations.csv: only with DECIM_LOG=1 (per-iteration data)
     // ======================================================================
-    if (decimationLogEnabled && hasGPU) {
+    if (hasGPU) {
         std::string baseName = modelPath;
         auto slash = baseName.find_last_of("/\\");
         if (slash != std::string::npos) baseName = baseName.substr(slash + 1);
@@ -679,7 +681,7 @@ void App::printDecimationMetrics() {
         auto epoch = std::chrono::duration_cast<std::chrono::seconds>(now.time_since_epoch()).count();
         std::string runId = std::to_string(epoch);
 
-        // --- decim_runs.csv ---
+        // --- decim_runs.csv (always) ---
         {
             std::string path = "decim_runs.csv";
             bool exists = std::ifstream(path).good();
@@ -734,8 +736,8 @@ void App::printDecimationMetrics() {
             std::cout << "Run summary -> decim_runs.csv (run " << runId << ")\n";
         }
 
-        // --- decim_iterations.csv ---
-        {
+        // --- decim_iterations.csv (only with DECIM_LOG=1) ---
+        if (decimationLogEnabled) {
             std::string path = "decim_iterations.csv";
             bool exists = std::ifstream(path).good();
             std::ofstream csv(path, std::ios::app);

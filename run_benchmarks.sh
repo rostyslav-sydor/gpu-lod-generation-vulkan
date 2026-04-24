@@ -2,25 +2,14 @@
 # =============================================================================
 # Thesis Benchmark Runner
 # =============================================================================
-# Prerequisites:
-#   - Build: make clean && make
-#   - Models in project root:
-#       scene.gltf        (Stanford Bunny,     ~70K tris)
-#       armadillo.obj      (Stanford Armadillo, ~345K tris)
-#       happy_buddha.obj   (Happy Buddha,       ~1.09M tris)
-#       Glykon.obj         (Glykon,             ~2.56M tris)
-#   - Download Stanford models from:
-#       https://graphics.stanford.edu/data/3Dscanrep/
-#
 # Usage:
-#   chmod +x run_benchmarks.sh
 #   ./run_benchmarks.sh              # run all experiments
 #   ./run_benchmarks.sh 1            # run only experiment 1
 #   ./run_benchmarks.sh 2            # run only experiment 2
 #   ./run_benchmarks.sh 3            # run only experiment 3
 #
 # Output: decim_runs.csv + decim_iterations.csv (appended per run)
-# Each run is repeated $REPEATS times (default 5). Median selection is manual.
+# Each run is repeated $REPEATS times (default 5). Median selected in analysis.
 # =============================================================================
 
 set -e
@@ -35,7 +24,6 @@ GLYKON="Glykon.obj"
 
 ALL_MODELS=("$BUNNY" "$ARMADILLO" "$BUDDHA" "$GLYKON")
 MODEL_NAMES=("bunny" "armadillo" "buddha" "glykon")
-
 
 run() {
     local desc="$1"; shift
@@ -63,7 +51,6 @@ EXPERIMENT="${1:-all}"
 # =============================================================================
 # EXPERIMENT 1: Light Iteration Frequency
 # Mode 0, ratio 0.1, sweep fullRebuildFreq = {1, 2, 3, 5, 10, 20}
-# All 4 models
 # =============================================================================
 if [ "$EXPERIMENT" = "all" ] || [ "$EXPERIMENT" = "1" ]; then
     echo ""
@@ -92,7 +79,7 @@ fi
 # =============================================================================
 # EXPERIMENT 2: Cost Modes + CPU Baseline
 # Best freq from Exp1 (default 5, override with BEST_FREQ env var)
-# All 4 models x ratios {0.5, 0.1, 0.01} x modes {0, 1, 2} + CPU
+# All models x ratios {0.5, 0.1, 0.01} x modes {0, 1, 2} + CPU
 # =============================================================================
 if [ "$EXPERIMENT" = "all" ] || [ "$EXPERIMENT" = "2" ]; then
     echo ""
@@ -107,7 +94,6 @@ if [ "$EXPERIMENT" = "all" ] || [ "$EXPERIMENT" = "2" ]; then
         model="${ALL_MODELS[$i]}"
         name="${MODEL_NAMES[$i]}"
         for ratio in 0.5 0.1 0.01; do
-            # GPU modes
             for mode in 0 1 2; do
                 run "Exp2: $name, ratio=$ratio, mode=$mode (GPU)" \
                     env MODEL_PATH="$model" \
@@ -120,7 +106,6 @@ if [ "$EXPERIMENT" = "all" ] || [ "$EXPERIMENT" = "2" ]; then
                         HEADLESS=1 \
                         $BINARY
             done
-            # CPU baseline (meshoptimizer)
             run "Exp2: $name, ratio=$ratio, CPU meshopt" \
                 env MODEL_PATH="$model" \
                     DECIM_RATIO=$ratio \
@@ -136,7 +121,7 @@ fi
 # =============================================================================
 # EXPERIMENT 3: Scalability
 # Best mode + freq from Exp1+2 (defaults: mode 0, freq 5)
-# All 4 models, ratio 0.1, GPU + CPU
+# All models, ratio 0.1, GPU + CPU
 # =============================================================================
 if [ "$EXPERIMENT" = "all" ] || [ "$EXPERIMENT" = "3" ]; then
     echo ""
@@ -147,13 +132,11 @@ if [ "$EXPERIMENT" = "all" ] || [ "$EXPERIMENT" = "3" ]; then
     FREQ=${BEST_FREQ:-5}
     MODE=${BEST_MODE:-0}
     echo "# Using mode=$MODE, fullRebuildFreq=$FREQ"
-    echo "# (set BEST_MODE and BEST_FREQ env vars to override)"
 
     for i in "${!ALL_MODELS[@]}"; do
         model="${ALL_MODELS[$i]}"
         name="${MODEL_NAMES[$i]}"
 
-        # GPU
         run "Exp3: $name, GPU (mode=$MODE, freq=$FREQ)" \
             env MODEL_PATH="$model" \
                 DECIM_MODE=$MODE \
@@ -165,7 +148,6 @@ if [ "$EXPERIMENT" = "all" ] || [ "$EXPERIMENT" = "3" ]; then
                 HEADLESS=1 \
                 $BINARY
 
-        # CPU
         run "Exp3: $name, CPU meshopt" \
             env MODEL_PATH="$model" \
                 DECIM_RATIO=0.1 \

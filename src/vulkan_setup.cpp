@@ -935,7 +935,7 @@ void App::mouseCallback(GLFWwindow* window, double xpos, double ypos) {
     app->lastMouseX = xpos;
     app->lastMouseY = ypos;
 
-    app->cameraYaw   += xoffset;
+    app->cameraYaw   -= xoffset;
     app->cameraPitch += yoffset;
     app->cameraPitch = glm::clamp(app->cameraPitch, -89.0f, 89.0f);
 
@@ -970,9 +970,9 @@ void App::processInput(float deltaTime) {
     if (glfwGetKey(window, GLFW_KEY_S) == GLFW_PRESS)
         cameraPos -= cameraFront * velocity;
     if (glfwGetKey(window, GLFW_KEY_A) == GLFW_PRESS)
-        cameraPos += right * velocity;
-    if (glfwGetKey(window, GLFW_KEY_D) == GLFW_PRESS)
         cameraPos -= right * velocity;
+    if (glfwGetKey(window, GLFW_KEY_D) == GLFW_PRESS)
+        cameraPos += right * velocity;
     if (glfwGetKey(window, GLFW_KEY_SPACE) == GLFW_PRESS)
         cameraPos += cameraUp * velocity;
     if (glfwGetKey(window, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS)
@@ -1263,7 +1263,8 @@ void App::createSyncObjects() {
 
 void App::updateUniformBuffer(uint32_t currentImage) {
     UniformBufferObject ubo{};
-    ubo.model = glm::rotate(glm::mat4(1.0f), glm::radians(-90.0f), glm::vec3(1.0f, 0.0f, 0.0f));
+    ubo.model = glm::rotate(glm::mat4(1.0f), glm::radians(180.0f), glm::vec3(0.0f, 0.0f, 1.0f))
+              * glm::rotate(glm::mat4(1.0f), glm::radians(-90.0f), glm::vec3(1.0f, 0.0f, 0.0f));
 
     ubo.view = glm::lookAt(cameraPos, cameraPos + cameraFront, cameraUp);
     ubo.proj = glm::perspective(glm::radians(45.0f), swapChainExtent.width / (float)swapChainExtent.height, 0.1f, 500.0f);

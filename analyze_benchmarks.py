@@ -47,7 +47,11 @@ os.makedirs(PLOT_DIR, exist_ok=True)
 # ── Load data ──────────────────────────────────────────────────────────────
 
 runs = pd.read_csv(RUNS_CSV)
-iters = pd.read_csv(ITER_CSV)
+iters = pd.read_csv(ITER_CSV) if os.path.exists(ITER_CSV) else pd.DataFrame()
+
+# Identify logged vs clean runs: logged runs have per-iteration data
+logged_run_ids = set(iters['run_id'].unique()) if not iters.empty else set()
+runs['logged'] = runs['run_id'].isin(logged_run_ids)
 
 # Detect models present in data and set order
 MODEL_ORDER = [m for m in ["scene.gltf", "Armadillo.ply", "buddha.ply", "Glykon.obj"]
@@ -123,11 +127,22 @@ else:
     runs.loc[mask_cpu, 'experiment'] = 'cpu'
 
 
-def median_row(group):
-    """Pick the row closest to median gpu_ms from a group of repeats."""
-    med = group['gpu_ms'].median()
-    closest = (group['gpu_ms'] - med).abs().idxmin()
-    return group.loc[closest]
+def median_row(group, prefer_clean=True):
+    """Pick the row closest to median gpu_ms. Prefers clean (non-logged) runs for timing."""
+    pool = group[~group['logged']] if (prefer_clean and (~group['logged']).any()) else group
+    med = pool['gpu_ms'].median()
+    closest = (pool['gpu_ms'] - med).abs().idxmin()
+    return pool.loc[closest]
+
+
+def logged_row(group):
+    """Pick a logged run for per-iteration data (convergence/pass plots)."""
+    pool = group[group['logged']]
+    if pool.empty:
+        pool = group
+    med = pool['gpu_ms'].median()
+    closest = (pool['gpu_ms'] - med).abs().idxmin()
+    return pool.loc[closest]
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -139,9 +154,10 @@ exp1['freq'] = exp1['freq'].astype(int)
 
 exp1_med = exp1.groupby(['model', 'freq']).apply(
     lambda g: pd.Series({
-        'gpu_ms': g['gpu_ms'].median(),
+        'gpu_ms': g[~g['logged']]['gpu_ms'].median() if (~g['logged']).any() else g['gpu_ms'].median(),
         'final_tris': g['gpu_final_tris'].median(),
-        'run_id': median_row(g)['run_id'],
+        'run_id_clean': median_row(g, prefer_clean=True)['run_id'],
+        'run_id_logged': logged_row(g)['run_id'],
     })
 ).reset_index()
 
@@ -189,7 +205,7 @@ for ax, model in zip(axes, MODEL_ORDER):
     best_freq = int(best_freq_row['freq'])
 
     for freq_val, color, ls in [(1, '#d62728', '-'), (best_freq, '#1f77b4', '--')]:
-        rid = mdata[mdata['freq'] == freq_val]['run_id'].values[0]
+        rid = mdata[mdata['freq'] == freq_val]['run_id_logged'].values[0]
         it = iters[iters['run_id'] == int(rid)].sort_values('iteration')
         if it.empty:
             continue
@@ -220,7 +236,7 @@ model_for_breakdown = "buddha.ply"
 mdata = exp1_med[exp1_med['model'] == model_for_breakdown].sort_values('freq')
 if not mdata.empty:
     best_freq = int(mdata.loc[mdata['gpu_ms'].idxmin(), 'freq'])
-    rid = mdata[mdata['freq'] == best_freq]['run_id'].values[0]
+    rid = mdata[mdata['freq'] == best_freq]['run_id_logged'].values[0]
     it = iters[iters['run_id'] == int(rid)].sort_values('iteration')
 
     if not it.empty and best_freq > 1:
@@ -355,8 +371,10 @@ for mode in [0, 1, 2]:
     g = get_gpu_group(model_conv, 0.1, mode)
     if g.empty:
         continue
-    rid = median_row(g)['run_id']
+    rid = logged_row(g)['run_id']
     it = iters[iters['run_id'] == int(rid)].sort_values('iteration')
+    if it.empty:
+        continue
     ax.plot(it['iteration'], it['tri_after'], color=colors[mode], lw=1.5,
             label=MODE_NAMES[mode])
 
@@ -444,7 +462,7 @@ for model in MODEL_ORDER:
 
     # Iteration/collapse stats from per-iteration data
     if not gpu_g.empty:
-        rid = median_row(gpu_g)['run_id']
+        rid = logged_row(gpu_g)['run_id']
         it = iters[iters['run_id'] == int(rid)]
         active_it = it[it['collapses'] > 0]
         n_iters = len(active_it)
@@ -508,7 +526,7 @@ for model, color in zip(MODEL_ORDER, ['#1f77b4', '#ff7f0e', '#2ca02c']):
         gpu_g = exp2[(exp2['model'] == model) & (exp2['target_ratio'] == 0.1) & (exp2['cost_mode'] == 0)]
     if gpu_g.empty:
         continue
-    rid = median_row(gpu_g)['run_id']
+    rid = logged_row(gpu_g)['run_id']
     it = iters[iters['run_id'] == int(rid)].sort_values('iteration')
     active = it[it['collapses'] > 0]
     ax.plot(active['iteration'], active['collapses'], color=color, lw=1.2,

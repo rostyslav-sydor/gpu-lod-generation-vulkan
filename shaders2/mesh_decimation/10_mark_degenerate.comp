@@ -25,6 +25,7 @@ layout(local_size_x = WORKGROUP_SIZE) in;
 void main() {
     uint gid = gl_GlobalInvocationID.x;
     if (gid >= counters[COUNTER_TRIANGLE_COUNT]) return;
+    if (counters[COUNTER_TRIANGLE_COUNT] <= targetTriCount) return;
 
     uint base = gid * 3u;
     uint v0 = posIndices[base + 0u];

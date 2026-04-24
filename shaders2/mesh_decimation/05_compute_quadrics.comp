@@ -80,6 +80,7 @@ void main() {
     barrier();
 
     uint actualTriCount = counters[COUNTER_TRIANGLE_COUNT];
+    if (actualTriCount <= targetTriCount) return;
     bool valid = (gid < actualTriCount);
     if (valid && aliveFlags[gid] == 0u)
         valid = false;

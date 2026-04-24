@@ -33,6 +33,7 @@ layout(local_size_x = WORKGROUP_SIZE) in;
 void main() {
     uint gid = gl_GlobalInvocationID.x;
     if (gid >= counters[COUNTER_EDGE_COUNT]) return;
+    if (counters[COUNTER_TRIANGLE_COUNT] <= targetTriCount) return;
 
     if (edgeTriangles[gid * 2u + 1u] != NONE) return;
 

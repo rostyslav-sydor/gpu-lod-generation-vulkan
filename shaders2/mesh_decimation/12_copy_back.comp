@@ -31,6 +31,8 @@
 layout(local_size_x = WORKGROUP_SIZE) in;
 
 void main() {
+    if (counters[COUNTER_TRIANGLE_COUNT] <= targetTriCount) return;
+
     uint newTriCount = counters[COUNTER_COMPACT_COUNT];
 
     uint gid = gl_GlobalInvocationID.x;
