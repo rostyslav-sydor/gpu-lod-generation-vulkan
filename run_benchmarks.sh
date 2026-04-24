@@ -126,9 +126,8 @@ if [ "$EXPERIMENT" = "all" ] || [ "$EXPERIMENT" = "2" ]; then
             # CPU baseline (meshoptimizer)
             run "Exp2: $name, ratio=$ratio, CPU meshopt" \
                 env MODEL_PATH="$model" \
-                    DECIM_MODE=0 \
                     DECIM_RATIO=$ratio \
-                    DECIM_NUM=0 \
+                    DECIM_NUM=1 \
                     DECIM_LOG=1 \
                     CPU_DECIM=1 \
                     HEADLESS=1 \
@@ -172,9 +171,8 @@ if [ "$EXPERIMENT" = "all" ] || [ "$EXPERIMENT" = "3" ]; then
         # CPU
         run "Exp3: $name, CPU meshopt" \
             env MODEL_PATH="$model" \
-                DECIM_MODE=0 \
                 DECIM_RATIO=0.1 \
-                DECIM_NUM=0 \
+                DECIM_NUM=1 \
                 DECIM_LOG=1 \
                 CPU_DECIM=1 \
                 HEADLESS=1 \
