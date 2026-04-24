@@ -142,10 +142,23 @@ void main() {
     uint v0 = edge.x;
     uint v1 = edge.y;
 
-    // Light iterations: clean edges early-exit (their descriptors persist from last iteration)
+    // Light iterations: skip clean edges, re-scatter 2-ring edges
     if (lightIteration != 0u) {
-        bool dirty = (posMap[v0] == iteration) || (posMap[v1] == iteration);
-        if (!dirty) return;
+        bool dirty1 = (posMap[v0] == iteration) || (posMap[v1] == iteration);
+        uint ring2 = iteration | 0x80000000u;
+        bool dirty2 = (posMap[v0] == ring2) || (posMap[v1] == ring2);
+        if (!dirty1 && !dirty2) return;
+        if (!dirty1 && dirty2) {
+            // 2-ring: re-scatter old descriptor without recomputing cost
+            float prevCost = edgeCost[gid];
+            if (prevCost >= 1e30 || (edgeFlags[gid] & EDGE_ELIGIBLE) == 0u) return;
+            if (((vertexFlags[v0] | vertexFlags[v1]) & FLAG_COLLAPSED) != 0u) return;
+            uint costBits = quantizeCostBits(prevCost, costQuantBits);
+            uint64_t descriptor = (uint64_t(costBits) << 32) | uint64_t(gid);
+            scatterToAdjacentTris(v0, descriptor);
+            scatterToAdjacentTris(v1, descriptor);
+            return;
+        }
     }
 
     uint flags0 = vertexFlags[v0];
