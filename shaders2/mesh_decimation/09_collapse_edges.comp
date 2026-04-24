@@ -97,6 +97,15 @@ void main() {
     // Replace v1 with v0 in all adjacent triangles of v1
     replaceInAdjacent(v1, v0);
 
+    // Merge v1's quadric into v0 (incremental QEM — avoids full rebuild next iteration)
+    if (costMode == COST_MODE_QEM) {
+        uint baseV0 = v0 * uint(QUADRIC_FIELDS);
+        uint baseV1 = v1 * uint(QUADRIC_FIELDS);
+        for (int i = 0; i < QUADRIC_FIELDS; i++) {
+            quadricsData[baseV0 + uint(i)] += quadricsData[baseV1 + uint(i)];
+        }
+    }
+
     // Mark v1 as collapsed
     atomicOr(vertexFlags[v1], FLAG_COLLAPSED);
 
