@@ -1023,7 +1023,7 @@ void App::runDecimation() {
         vkCmdResetQueryPool(cmd, iterTimestampPool, 0, maxDecimationIterations * TS_PER_ITER);
     }
 
-    const uint32_t fullRebuildFreq = 5;
+    const uint32_t fullRebuildFreq = decimationFullRebuildFreq;
 
     for (uint32_t iteration = 0; iteration < maxDecimationIterations; iteration++) {
         bool isLight = (iteration > 0) && (iteration % fullRebuildFreq != 0);
@@ -1721,7 +1721,7 @@ void App::stepInteractiveDecimation() {
             VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &barrier, 0, nullptr, 0, nullptr);
     };
 
-    bool isLight = (interactiveIteration > 0) && (interactiveIteration % 5 != 0);
+    bool isLight = (interactiveIteration > 0) && (interactiveIteration % decimationFullRebuildFreq != 0);
 
     DecimationPushConstants pc{};
     pc.vertexCount = vertCount;
