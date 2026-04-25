@@ -9,7 +9,7 @@
 //
 // Fuses the old Pass 6 (compute_edge_cost) + Pass 8 (select_candidates)
 // into a single kernel. For each edge:
-//   1. Compute QEM/paper/meshopt cost and optimal position
+//   1. Compute QEM/curvature/edge-length cost and optimal position
 //   2. If eligible, immediately scatter via atomicMin to adjacent triangles
 //
 // This eliminates one dispatch + barrier + redundant buffer reads.

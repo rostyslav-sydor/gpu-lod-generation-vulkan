@@ -30,8 +30,8 @@ MODEL_TRIS = {
 }
 
 EXP1_FREQS = [1, 2, 3, 5, 10, 20]
-MODE_NAMES = {0: "Mode 0 (QEM)", 1: "Mode 1 (Curvature)", 2: "Mode 2 (Endpoint)"}
-MODE_SHORT = {0: "Mode 0", 1: "Mode 1", 2: "Mode 2"}
+MODE_NAMES = {0: "Mode 0 (QEM)", 1: "Mode 1 (Curvature)", 2: "Mode 2 (Edge length)"}
+MODE_SHORT = {0: "QEM", 1: "Curvature", 2: "Edge length"}
 
 plt.rcParams.update({
     'figure.figsize': (8, 5),
@@ -340,7 +340,7 @@ print(r"\begin{table}[H]")
 print(r"\centering")
 print(r"\begin{tabular}{l l r r r r}")
 print(r"\hline")
-print(r"\textbf{Model} & \textbf{Ratio} & \textbf{Mode 0 (ms)} & \textbf{Mode 1 (ms)} & \textbf{Mode 2 (ms)} & \textbf{meshopt (ms)} \\")
+print(r"\textbf{Model} & \textbf{Ratio} & \textbf{QEM (ms)} & \textbf{Curvature (ms)} & \textbf{Edge length (ms)} & \textbf{meshopt (ms)} \\")
 print(r"\hline")
 
 timing_rows = [
@@ -392,13 +392,13 @@ for model, ratio in quality_rows:
             continue
         med = g[quality_metrics].median()
         print(f"{MODEL_NAMES[model]} & {ratio} & {MODE_SHORT[mode]} & "
-              f"{med.iloc[0]:.6f} & {med.iloc[1]:.6f} & {med.iloc[2]:.1f}\\degree & {med.iloc[3]:.1f}\\degree \\\\")
+              f"{med.iloc[0]:.6f} & {med.iloc[1]:.6f} & {med.iloc[2]:.1f} & {med.iloc[3]:.1f} \\\\")
 
     cpu_g = cpu_runs[(cpu_runs['model'] == model) & (cpu_runs['target_ratio'] == ratio)]
     if not cpu_g.empty and cpu_g['cpu_hausdorff'].notna().any():
         cmed = cpu_g[cpu_quality_metrics].median()
         print(f"{MODEL_NAMES[model]} & {ratio} & meshopt & "
-              f"{cmed.iloc[0]:.6f} & {cmed.iloc[1]:.6f} & {cmed.iloc[2]:.1f}\\degree & {cmed.iloc[3]:.1f}\\degree \\\\")
+              f"{cmed.iloc[0]:.6f} & {cmed.iloc[1]:.6f} & {cmed.iloc[2]:.1f} & {cmed.iloc[3]:.1f} \\\\")
     print(r"\hline")
 
 print(r"\end{tabular}")

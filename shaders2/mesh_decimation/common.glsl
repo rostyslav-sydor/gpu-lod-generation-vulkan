@@ -48,7 +48,7 @@ struct Vertex {
 //   | q1  q4  q5  q6 |
 //   | q2  q5  q7  q8 |
 //   | q3  q6  q8  q9 |
-// q[10] = w (accumulated weight, used by COST_MODE_MESHOPT for normalization)
+// q[10] = w (accumulated weight)
 struct Quadric {
     float q[11];
 };
