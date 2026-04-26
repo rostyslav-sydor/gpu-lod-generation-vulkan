@@ -31,7 +31,7 @@
 layout(local_size_x = WORKGROUP_SIZE) in;
 
 void main() {
-    if (counters[COUNTER_TRIANGLE_COUNT] <= targetTriCount) return;
+    if (counters[COUNTER_ALIVE_ESTIMATE] <= targetTriCount) return;
 
     uint newTriCount = counters[COUNTER_COMPACT_COUNT];
 
@@ -52,8 +52,8 @@ void main() {
     posIndices[base + 1u] = scanData[posIndicesOffset + base + 1u];
     posIndices[base + 2u] = scanData[posIndicesOffset + base + 2u];
 
-    // First thread writes the new triangle count
     if (gid == 0u) {
         counters[COUNTER_TRIANGLE_COUNT] = newTriCount;
+        counters[COUNTER_ALIVE_ESTIMATE] = newTriCount;
     }
 }

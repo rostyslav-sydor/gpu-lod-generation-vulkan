@@ -19,6 +19,7 @@
 #define COUNTER_TRIANGLE_COUNT  2
 #define COUNTER_VERTEX_COUNT    3
 #define COUNTER_COMPACT_COUNT   4
+#define COUNTER_ALIVE_ESTIMATE  5
 
 // Vertex flags
 #define FLAG_DISCONTINUITY  (1u << 0)

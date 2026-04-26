@@ -283,7 +283,7 @@ private:
 
     // Logging data saved by runDecimation for printDecimationMetrics
     struct IterLogEntry {
-        uint32_t edges, collapses, triangles, eligible, compacted;
+        uint32_t edges, collapses, triangles, eligible, compacted, alive;
         double gpu_ms;
         double pass_ms[10];
     };

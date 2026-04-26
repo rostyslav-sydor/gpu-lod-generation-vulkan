@@ -755,7 +755,7 @@ void App::printDecimationMetrics() {
             bool exists = std::ifstream(path).good();
             std::ofstream csv(path, std::ios::app);
             if (!exists) {
-                csv << "run_id,iteration,edges,eligible,collapses,tri_after,iter_gpu_ms,"
+                csv << "run_id,iteration,edges,eligible,collapses,tri_after,alive_estimate,iter_gpu_ms,"
                        "build_adj_ms,build_edges_ms,flag_bndry_ms,quadrics_ms,cost_scatter_ms,"
                        "collapse_ms,patch_edges_ms,mark_degen_ms,compact_ms,copyback_ms\n";
             }
@@ -766,6 +766,7 @@ void App::printDecimationMetrics() {
                     << logIterData[i].eligible << ","
                     << logIterData[i].collapses << ","
                     << logIterData[i].triangles << ","
+                    << logIterData[i].alive << ","
                     << std::fixed << std::setprecision(4) << logIterData[i].gpu_ms;
                 for (int p = 0; p < 10; p++)
                     csv << "," << std::setprecision(4) << logIterData[i].pass_ms[p];
@@ -1011,7 +1012,7 @@ void App::runDecimation() {
     uint32_t edgeDispatchWGs = divUp(maxEdges, WORKGROUP_SIZE);
 
     // Per-iteration logging resources (only when DECIM_LOG=1)
-    const uint32_t COUNTERS_PER_ITER = 5;
+    const uint32_t COUNTERS_PER_ITER = 6;
     const uint32_t PASSES_PER_ITER = 10;
     const uint32_t TS_PER_ITER = PASSES_PER_ITER + 1; // 1 start + 10 pass ends
     VkBuffer iterStatsBuf = VK_NULL_HANDLE;
@@ -1093,7 +1094,7 @@ void App::runDecimation() {
             submitAndWait(cmd);
             cmd = beginCmd();
             if (isLight) {
-                vkCmdFillBuffer(cmd, decimationBufs[DB_COUNTER], 4, 4, 0);
+                // Don't clear COLLAPSE_COUNT — P3 thread 0 reads it to update ALIVE_ESTIMATE
                 vkCmdFillBuffer(cmd, decimationBufs[DB_COUNTER], 12, 8, 0);
             } else {
                 vkCmdFillBuffer(cmd, decimationBufs[DB_COUNTER], 0, 8, 0);
@@ -1104,9 +1105,11 @@ void App::runDecimation() {
             vkCmdFillBuffer(cmd, decimationBufs[DB_TRI_EDGE], 0, decimationBufSizes[DB_TRI_EDGE], 0);
             vkCmdFillBuffer(cmd, decimationBufs[DB_QUADRIC], 0, decimationBufSizes[DB_QUADRIC], 0);
             if (iteration == 0) {
-                uint32_t initVal = triCount;
+                uint32_t initVals[2] = { triCount, triCount };
                 vkCmdUpdateBuffer(cmd, decimationBufs[DB_COUNTER],
-                    2 * sizeof(uint32_t), sizeof(uint32_t), &initVal);
+                    2 * sizeof(uint32_t), sizeof(uint32_t), &initVals[0]);
+                vkCmdUpdateBuffer(cmd, decimationBufs[DB_COUNTER],
+                    5 * sizeof(uint32_t), sizeof(uint32_t), &initVals[1]);
             }
             submitAndWait(cmd);
 
@@ -1124,7 +1127,7 @@ void App::runDecimation() {
                 // Dump counters after each pass
                 if (decimationUseDeviceLocal) {
                     cmd = beginCmd();
-                    VkBufferCopy rgn{}; rgn.size = 5 * sizeof(uint32_t);
+                    VkBufferCopy rgn{}; rgn.size = 6 * sizeof(uint32_t);
                     vkCmdCopyBuffer(cmd, decimationBufs[DB_COUNTER], counterReadbackBuf, 1, &rgn);
                     VkMemoryBarrier mb{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
                     mb.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
@@ -1134,7 +1137,8 @@ void App::runDecimation() {
                     submitAndWait(cmd);
                     auto* c = static_cast<uint32_t*>(counterReadbackMapped);
                     std::cerr << " [edges=" << c[0] << " collapse=" << c[1]
-                              << " tris=" << c[2] << " elig=" << c[3] << " compact=" << c[4] << "]";
+                              << " tris=" << c[2] << " elig=" << c[3] << " compact=" << c[4]
+                              << " alive=" << c[5] << "]";
                 }
                 std::cerr << "\n";
             }
@@ -1152,24 +1156,25 @@ void App::runDecimation() {
 
         // Normal (batched) path
         if (isLight) {
-            vkCmdFillBuffer(cmd, decimationBufs[DB_COUNTER], 4, 4, 0);   // COLLAPSE_COUNT
+            // Don't clear COLLAPSE_COUNT — P3 thread 0 reads it to update ALIVE_ESTIMATE
             vkCmdFillBuffer(cmd, decimationBufs[DB_COUNTER], 12, 8, 0);  // VERTEX_COUNT, COMPACT_COUNT
         } else {
-            // Full iteration: clear all per-iteration counters
+            // Full iteration: clear per-iteration counters (EDGE_COUNT, COLLAPSE_COUNT)
             vkCmdFillBuffer(cmd, decimationBufs[DB_COUNTER], 0, 8, 0);
-            vkCmdFillBuffer(cmd, decimationBufs[DB_COUNTER], 12, 8, 0);
+            vkCmdFillBuffer(cmd, decimationBufs[DB_COUNTER], 12, 8, 0);  // VERTEX_COUNT, COMPACT_COUNT
             vkCmdFillBuffer(cmd, decimationBufs[DB_HASHMAP_EDGE], 0, edgeHashMapSize, 0xFFFFFFFF);
         }
         vkCmdFillBuffer(cmd, decimationBufs[DB_ADJ_HEAD], 0, decimationBufSizes[DB_ADJ_HEAD], 0xFFFFFFFF);
         vkCmdFillBuffer(cmd, decimationBufs[DB_TRI_EDGE], 0, decimationBufSizes[DB_TRI_EDGE], 0);  // valence
         vkCmdFillBuffer(cmd, decimationBufs[DB_QUADRIC], 0, decimationBufSizes[DB_QUADRIC], 0);
 
-        // Initialize COUNTER_TRIANGLE_COUNT on first iteration (AFTER fills to avoid
-        // cache coherency issues where adjacent fills invalidate this value on some drivers)
+        // Initialize COUNTER_TRIANGLE_COUNT and COUNTER_ALIVE_ESTIMATE on first iteration
         if (iteration == 0) {
-            uint32_t initVal = triCount;
+            uint32_t initVals[2] = { triCount, triCount };
             vkCmdUpdateBuffer(cmd, decimationBufs[DB_COUNTER],
-                2 * sizeof(uint32_t), sizeof(uint32_t), &initVal);
+                2 * sizeof(uint32_t), sizeof(uint32_t), &initVals[0]);  // TRIANGLE_COUNT
+            vkCmdUpdateBuffer(cmd, decimationBufs[DB_COUNTER],
+                5 * sizeof(uint32_t), sizeof(uint32_t), &initVals[1]);  // ALIVE_ESTIMATE
         }
 
         transferToComputeBarrier(cmd);
@@ -1283,6 +1288,7 @@ void App::runDecimation() {
 
     long long totalUs = gpuTimer.getTime();
     triCount = readCounter(2);
+    uint32_t aliveEstimate = readCounter(5);
 
     // Read GPU time (don't use WAIT_BIT — if device was lost, it would hang)
     double totalGpuMs = 0;
@@ -1296,7 +1302,7 @@ void App::runDecimation() {
 
     // Read per-iteration stats (only when logging)
     struct IterStats {
-        uint32_t edges, collapses, triangles, eligible, compacted;
+        uint32_t edges, collapses, triangles, eligible, compacted, alive;
         double gpu_ms;
         double pass_ms[10]; // per-pass GPU time
     };
@@ -1314,6 +1320,7 @@ void App::runDecimation() {
             iterData[i].triangles = p[i * COUNTERS_PER_ITER + 2];
             iterData[i].eligible  = p[i * COUNTERS_PER_ITER + 3];
             iterData[i].compacted = p[i * COUNTERS_PER_ITER + 4];
+            iterData[i].alive     = p[i * COUNTERS_PER_ITER + 5];
         }
         vkUnmapMemory(device, iterStatsMem);
         vkDestroyBuffer(device, iterStatsBuf, nullptr);
@@ -1364,7 +1371,7 @@ void App::runDecimation() {
     uint32_t lastCollapses = readCounter(1);
     uint32_t lastEdges = readCounter(0);
     std::cout << "  " << maxDecimationIterations << " iterations: "
-              << triCount << " tris (was " << originalTriCount << ")"
+              << aliveEstimate << " alive tris (" << triCount << " in buffer, was " << originalTriCount << ")"
               << "  gpu=" << std::fixed << std::setprecision(0) << totalGpuMs << "ms"
               << "  total=" << totalUs / 1000 << "ms"
               << "  last iter: " << lastEdges << " edges, " << lastEligible << " eligible, " << lastCollapses << " collapses"
@@ -1373,7 +1380,7 @@ void App::runDecimation() {
     // ======================================================================
     // Phase 3: Read back results
     // ======================================================================
-    std::cout << "Decimation complete: " << originalTriCount << " -> " << triCount << " triangles\n";
+    std::cout << "Decimation complete: " << originalTriCount << " -> " << aliveEstimate << " alive triangles (" << triCount << " in buffer)\n";
 
     // Read back vertices
     {
@@ -1496,13 +1503,14 @@ void App::runDecimation() {
             logIterData[i].triangles = iterData[i].triangles;
             logIterData[i].eligible  = iterData[i].eligible;
             logIterData[i].compacted = iterData[i].compacted;
+            logIterData[i].alive     = iterData[i].alive;
             logIterData[i].gpu_ms    = iterData[i].gpu_ms;
             for (int p = 0; p < 10; p++) logIterData[i].pass_ms[p] = iterData[i].pass_ms[p];
         }
         logGpuMs = totalGpuMs;
         logTotalUs = totalUs;
         logOrigTriCount = originalTriCount;
-        logFinalTriCount = triCount;
+        logFinalTriCount = aliveEstimate;
     }
 }
 
@@ -1638,8 +1646,9 @@ void App::readbackDecimationState() {
     uint32_t lastEdges = readCounter(0);
     uint32_t lastCollapses = readCounter(1);
     uint32_t lastEligible = readCounter(3);
+    uint32_t aliveEst = readCounter(5);
     std::cout << "[step " << interactiveIteration << "] "
-              << triCount << " tris (was " << interactiveOrigTriCount << ")  "
+              << aliveEst << " alive tris (" << triCount << " in buffer, was " << interactiveOrigTriCount << ")  "
               << lastEdges << " edges, " << lastEligible << " eligible, "
               << lastCollapses << " collapses" << std::endl;
 }
@@ -1786,10 +1795,12 @@ void App::initInteractiveDecimation() {
         dispatchPass(1, divUp(triCount, WORKGROUP_SIZE));
         computeBarrier();
 
-        // Initialize COUNTER_TRIANGLE_COUNT
-        uint32_t initVal = triCount;
+        // Initialize COUNTER_TRIANGLE_COUNT and COUNTER_ALIVE_ESTIMATE
+        uint32_t initVals[2] = { triCount, triCount };
         vkCmdUpdateBuffer(computeCommandBuffer, decimationBufs[DB_COUNTER],
-            2 * sizeof(uint32_t), sizeof(uint32_t), &initVal);
+            2 * sizeof(uint32_t), sizeof(uint32_t), &initVals[0]);
+        vkCmdUpdateBuffer(computeCommandBuffer, decimationBufs[DB_COUNTER],
+            5 * sizeof(uint32_t), sizeof(uint32_t), &initVals[1]);
         {
             VkMemoryBarrier barrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
             barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
@@ -1880,7 +1891,7 @@ void App::stepInteractiveDecimation() {
 
     // Clear per-iteration state
     if (isLight) {
-        vkCmdFillBuffer(computeCommandBuffer, decimationBufs[DB_COUNTER], 4, 4, 0);   // COLLAPSE_COUNT
+        // Don't clear COLLAPSE_COUNT — P3 thread 0 reads it to update ALIVE_ESTIMATE
         vkCmdFillBuffer(computeCommandBuffer, decimationBufs[DB_COUNTER], 12, 8, 0);
     } else {
         vkCmdFillBuffer(computeCommandBuffer, decimationBufs[DB_COUNTER], 0, 8, 0);

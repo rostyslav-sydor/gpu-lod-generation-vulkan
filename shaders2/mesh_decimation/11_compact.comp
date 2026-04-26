@@ -46,7 +46,7 @@ void main() {
     uint lid = gl_LocalInvocationID.x;
     uint subgroupIdx = gl_SubgroupID;
 
-    if (counters[COUNTER_TRIANGLE_COUNT] <= targetTriCount) return;
+    if (counters[COUNTER_ALIVE_ESTIMATE] <= targetTriCount) return;
 
     // Determine if this triangle is alive
     bool alive = false;

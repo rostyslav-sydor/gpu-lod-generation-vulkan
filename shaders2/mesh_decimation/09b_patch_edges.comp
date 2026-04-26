@@ -117,9 +117,6 @@ void main() {
     edges[edgeId] = uvec2(NONE, NONE);
     edgeFlags[edgeId] = 0u;
 
-    // DEBUG: skip edge renaming to isolate the bug
-    return;
-
     // --- Step 2: Walk v1's adjacency ring, patch neighboring edges ---
     // adjHead[v1] still points to v1's pre-collapse adjacency (built by P3 before P9).
     // Each entry tells us: triangle index and which slot v1 occupied.

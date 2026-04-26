@@ -32,17 +32,17 @@
 layout(local_size_x = WORKGROUP_SIZE) in;
 
 void main() {
-    // Thread 0: update triangle count from previous iteration's collapses.
-    // Each collapse removes ~2 triangles. Corrected on full iterations by compaction.
+    // Thread 0: update alive estimate from previous iteration's collapses.
+    // Each collapse removes ~2 triangles. Authoritative value set by P12 on full iterations.
     if (gl_GlobalInvocationID.x == 0u) {
         uint prevCollapses = atomicExchange(counters[COUNTER_COLLAPSE_COUNT], 0u);
         if (prevCollapses > 0u)
-            atomicAdd(counters[COUNTER_TRIANGLE_COUNT], uint(-2u * prevCollapses));
+            atomicAdd(counters[COUNTER_ALIVE_ESTIMATE], uint(-2u * prevCollapses));
     }
 
     uint gid = gl_GlobalInvocationID.x;
     if (gid >= counters[COUNTER_TRIANGLE_COUNT]) return;
-    if (counters[COUNTER_TRIANGLE_COUNT] <= targetTriCount) return;
+    if (counters[COUNTER_ALIVE_ESTIMATE] <= targetTriCount) return;
 
     if (aliveFlags[gid] == 0u) return;
 
