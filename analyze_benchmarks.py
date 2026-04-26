@@ -214,9 +214,9 @@ print("=" * 72)
 print("\n% --- LaTeX Table: Frequency Sweep ---")
 print(r"\begin{table}[H]")
 print(r"\centering")
-print(r"\begin{tabular}{l r r r r}")
+print(r"\begin{tabular}{l r r r}")
 print(r"\hline")
-print(r"\textbf{Model} & \textbf{fullRebuildFreq} & \textbf{GPU Time (ms)} & \textbf{Final Tris} & \textbf{Speedup} \\")
+print(r"\textbf{Model} & \textbf{fullRebuildFreq} & \textbf{GPU Time (ms)} & \textbf{Speedup} \\")
 print(r"\hline")
 
 for model in MODEL_ORDER:
@@ -227,7 +227,7 @@ for model in MODEL_ORDER:
     for _, row in mdata.iterrows():
         speedup = baseline_ms / row['gpu_ms']
         print(f"{MODEL_NAMES[model]} & {int(row['freq'])} & {row['gpu_ms']:.1f} & "
-              f"{int(row['final_tris'])} & {speedup:.2f}$\\times$ \\\\")
+              f"{speedup:.2f}$\\times$ \\\\")
     print(r"\hline")
 
 print(r"\end{tabular}")
@@ -268,6 +268,40 @@ fig.tight_layout()
 fig.savefig(f"{PLOT_DIR}/convergence_full_vs_light.png", dpi=150, bbox_inches='tight')
 plt.close(fig)
 print(f"\n→ Saved {PLOT_DIR}/convergence_full_vs_light.png")
+
+# ── Exp1 Plot: Convergence curves over TIME (freq=1 vs best) ──
+
+fig, axes = plt.subplots(1, len(MODEL_ORDER), figsize=(14, 4.5), sharey=False)
+if len(MODEL_ORDER) == 1:
+    axes = [axes]
+
+for ax, model in zip(axes, MODEL_ORDER):
+    mdata = exp1_med[exp1_med['model'] == model].sort_values('freq')
+    if mdata.empty:
+        continue
+    best_freq_row = mdata.loc[mdata['gpu_ms'].idxmin()]
+    best_freq = int(best_freq_row['freq'])
+
+    for freq_val, color, ls in [(1, '#d62728', '-'), (best_freq, '#1f77b4', '--')]:
+        rid = mdata[mdata['freq'] == freq_val]['run_id_logged'].values[0]
+        it = iters[iters['run_id'] == int(rid)].sort_values('iteration')
+        if it.empty:
+            continue
+        cum_ms = it['iter_gpu_ms'].cumsum()
+        ax.plot(cum_ms, it['tri_after'], color=color, ls=ls, lw=1.5,
+                label=f"freq={freq_val}")
+
+    ax.set_title(MODEL_NAMES[model], fontsize=12)
+    ax.set_xlabel("Cumulative GPU time (ms)")
+    ax.set_ylabel("Triangles remaining")
+    ax.legend()
+    ax.xaxis.set_minor_locator(AutoMinorLocator())
+
+fig.suptitle("Convergence over Time: Full Rebuild vs. Best Light Frequency", fontsize=13, y=1.02)
+fig.tight_layout()
+fig.savefig(f"{PLOT_DIR}/convergence_full_vs_light_time.png", dpi=150, bbox_inches='tight')
+plt.close(fig)
+print(f"→ Saved {PLOT_DIR}/convergence_full_vs_light_time.png")
 
 # ── Exp1 Plot: Per-pass time breakdown (full vs light) ──
 
@@ -562,10 +596,12 @@ fig.savefig(f"{PLOT_DIR}/time_vs_tris.png", dpi=150, bbox_inches='tight')
 plt.close(fig)
 print(f"\n→ Saved {PLOT_DIR}/time_vs_tris.png")
 
+colors_iter = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728']
+
 # ── Exp3 Plot: Collapses per iteration ──
 
 fig, ax = plt.subplots(figsize=(8, 5))
-for model, color in zip(MODEL_ORDER, ['#1f77b4', '#ff7f0e', '#2ca02c']):
+for model, color in zip(MODEL_ORDER, colors_iter):
     gpu_g = runs[(runs['experiment'] == 'exp3') & (runs['model'] == model) & (runs['max_iterations'] == 300)]
     if gpu_g.empty:
         gpu_g = exp2[(exp2['model'] == model) & (exp2['target_ratio'] == 0.1) & (exp2['cost_mode'] == 0)]
@@ -586,10 +622,98 @@ fig.savefig(f"{PLOT_DIR}/collapses_per_iter.png", dpi=150, bbox_inches='tight')
 plt.close(fig)
 print(f"→ Saved {PLOT_DIR}/collapses_per_iter.png")
 
+# ── Plot: Collapses per second ──
+
+fig, ax = plt.subplots(figsize=(8, 5))
+for model, color in zip(MODEL_ORDER, colors_iter):
+    gpu_g = runs[(runs['experiment'] == 'exp3') & (runs['model'] == model) & (runs['max_iterations'] == 300)]
+    if gpu_g.empty:
+        gpu_g = exp2[(exp2['model'] == model) & (exp2['target_ratio'] == 0.1) & (exp2['cost_mode'] == 0)]
+    if gpu_g.empty:
+        continue
+    rid = logged_row(gpu_g)['run_id']
+    it = iters[iters['run_id'] == int(rid)].sort_values('iteration')
+    active = it[(it['collapses'] > 0) & (it['iter_gpu_ms'] > 0)].copy()
+    if active.empty:
+        continue
+    active['collapses_per_sec'] = active['collapses'] / (active['iter_gpu_ms'] / 1000.0)
+    ax.plot(active['iteration'], active['collapses_per_sec'] / 1e6, color=color, lw=1.2,
+            label=f"{MODEL_NAMES[model]} ({MODEL_TRIS[model]} tris)")
+
+ax.set_xlabel("Iteration")
+ax.set_ylabel("Collapses / sec (millions)")
+ax.set_title("Collapse Throughput vs. Iteration (Mode 0, ratio=0.1)")
+ax.legend()
+fig.tight_layout()
+fig.savefig(f"{PLOT_DIR}/collapses_per_sec.png", dpi=150, bbox_inches='tight')
+plt.close(fig)
+print(f"→ Saved {PLOT_DIR}/collapses_per_sec.png")
+
+# ── Plot: Collapses/sec at different light iteration frequencies (one model) ──
+
+freq_model = "buddha.ply"
+freq_colors = {1: '#d62728', 2: '#ff7f0e', 3: '#2ca02c', 5: '#1f77b4', 10: '#9467bd', 20: '#8c564b'}
+ROLLING_WINDOW = 3
+fig, ax = plt.subplots(figsize=(8, 5))
+plotted_any = False
+for freq_val in EXP1_FREQS:
+    fg = exp1[(exp1['model'] == freq_model) & (exp1['freq'] == freq_val)]
+    if fg.empty:
+        continue
+    rid = logged_row(fg)['run_id']
+    it = iters[iters['run_id'] == int(rid)].sort_values('iteration')
+    active = it[(it['collapses'] > 0) & (it['iter_gpu_ms'] > 0)].copy()
+    if active.empty:
+        continue
+    active['cps'] = active['collapses'] / (active['iter_gpu_ms'] / 1000.0)
+    smoothed = active['cps'].rolling(ROLLING_WINDOW, center=True, min_periods=1).mean()
+    color = freq_colors.get(freq_val, '#333')
+    ax.plot(active['iteration'], smoothed / 1e6,
+            color=color, lw=1.8, label=f"freq={freq_val}")
+    plotted_any = True
+
+if plotted_any:
+    ax.set_xlabel("Iteration")
+    ax.set_ylabel("Collapses / sec (millions)")
+    ax.set_title(f"Collapse Throughput at Different Light-Iter Frequencies ({MODEL_NAMES[freq_model]})")
+    ax.legend()
+    fig.tight_layout()
+    fig.savefig(f"{PLOT_DIR}/collapses_per_sec_freq.png", dpi=150, bbox_inches='tight')
+    print(f"→ Saved {PLOT_DIR}/collapses_per_sec_freq.png")
+plt.close(fig)
+
+# ── Plot: Quality vs light-iteration frequency ──
+
+quality_model = "buddha.ply"
+q_metrics = [
+    ('gpu_hausdorff',      'Hausdorff distance', '#e74c3c'),
+    ('gpu_avg_vert_dist',  'Mean vertex distance', '#3498db'),
+    ('gpu_avg_normal_dev', 'Mean normal deviation (°)', '#2ecc71'),
+]
+qm = exp1[exp1['model'] == quality_model]
+if not qm.empty:
+    fig, axes = plt.subplots(1, 3, figsize=(12, 4))
+    freqs_sorted = sorted(qm['freq'].dropna().unique())
+
+    for ax, (col, label, color) in zip(axes, q_metrics):
+        medians = [qm[qm['freq'] == f][col].median() for f in freqs_sorted]
+        ax.bar([str(int(f)) for f in freqs_sorted], medians, color=color, alpha=0.8, edgecolor='#333', linewidth=0.5)
+        ax.set_xlabel("fullRebuildFreq")
+        ax.set_ylabel(label)
+        ax.set_title(label)
+        for i, v in enumerate(medians):
+            fmt = f"{v:.6f}" if v < 0.01 else (f"{v:.4f}" if v < 1 else f"{v:.2f}")
+            ax.text(i, v, fmt, ha='center', va='bottom', fontsize=8)
+
+    fig.suptitle(f"Quality vs. Light-Iteration Frequency ({MODEL_NAMES[quality_model]}, QEM, ratio=0.1)", fontsize=13, y=1.02)
+    fig.tight_layout()
+    fig.savefig(f"{PLOT_DIR}/quality_vs_freq.png", dpi=150, bbox_inches='tight')
+    plt.close(fig)
+    print(f"→ Saved {PLOT_DIR}/quality_vs_freq.png")
+
 # ── Plot: Triangles over cumulative GPU time ──
 
 fig, ax = plt.subplots(figsize=(8, 5))
-colors_iter = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728']
 for model, color in zip(MODEL_ORDER, colors_iter):
     gpu_g = runs[(runs['experiment'] == 'exp3') & (runs['model'] == model) & (runs['max_iterations'] == 300)]
     if gpu_g.empty:

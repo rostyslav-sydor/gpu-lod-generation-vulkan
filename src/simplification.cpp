@@ -558,19 +558,32 @@ static MeshMetrics computeMetrics(
     }
 
     if (origVerts && origInds && !origInds->empty()) {
-        TriGrid grid(*origVerts, *origInds);
+        // Forward: simplified vertices -> original surface
+        TriGrid gridOrig(*origVerts, *origInds);
 
         std::unordered_set<uint32_t> usedVerts(inds.begin(), inds.end());
-        float maxDist = 0.0f, sumDist = 0.0f;
+        float fwdMax = 0.0f, sumDist = 0.0f;
         uint32_t distCount = 0;
         for (uint32_t vi : usedVerts) {
             if (vi >= verts.size()) continue;
-            float d = grid.nearestDist(verts[vi].pos, *origVerts, *origInds);
-            maxDist = std::max(maxDist, d);
+            float d = gridOrig.nearestDist(verts[vi].pos, *origVerts, *origInds);
+            fwdMax = std::max(fwdMax, d);
             sumDist += d;
             distCount++;
         }
-        m.hausdorffDist = maxDist;
+
+        // Reverse: original vertices -> simplified surface
+        TriGrid gridSimp(verts, inds);
+
+        std::unordered_set<uint32_t> origUsed(origInds->begin(), origInds->end());
+        float revMax = 0.0f;
+        for (uint32_t vi : origUsed) {
+            if (vi >= origVerts->size()) continue;
+            float d = gridSimp.nearestDist((*origVerts)[vi].pos, verts, inds);
+            revMax = std::max(revMax, d);
+        }
+
+        m.hausdorffDist = std::max(fwdMax, revMax);
         m.avgVertDist = (distCount > 0) ? sumDist / distCount : 0.0f;
 
         float sumNormalDev = 0.0f;
@@ -585,7 +598,7 @@ static MeshMetrics computeMetrics(
             glm::vec3 centroid = (verts[i0].pos + verts[i1].pos + verts[i2].pos) / 3.0f;
 
             glm::vec3 bestNormal;
-            grid.nearestDist(centroid, *origVerts, *origInds, &bestNormal);
+            gridOrig.nearestDist(centroid, *origVerts, *origInds, &bestNormal);
             float cosA = glm::clamp(glm::dot(fn, bestNormal), -1.0f, 1.0f);
             sumNormalDev += glm::degrees(std::acos(cosA));
             normalCount++;
