@@ -21,6 +21,15 @@
 #define COUNTER_COMPACT_COUNT   4
 #define COUNTER_ALIVE_ESTIMATE  5
 
+// Indirect dispatch commands stored in counters[] buffer
+// VkDispatchIndirectCommand = { x, y, z } at uint indices:
+#define INDIRECT_TRI_X   8
+#define INDIRECT_TRI_Y   9
+#define INDIRECT_TRI_Z  10
+#define INDIRECT_EDGE_X 12
+#define INDIRECT_EDGE_Y 13
+#define INDIRECT_EDGE_Z 14
+
 // Vertex flags
 #define FLAG_DISCONTINUITY  (1u << 0)
 #define FLAG_BOUNDARY       (1u << 1)

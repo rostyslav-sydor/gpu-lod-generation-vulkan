@@ -55,5 +55,10 @@ void main() {
     if (gid == 0u) {
         counters[COUNTER_TRIANGLE_COUNT] = newTriCount;
         counters[COUNTER_ALIVE_ESTIMATE] = newTriCount;
+
+        uint triWGs = (newTriCount + WORKGROUP_SIZE - 1u) / WORKGROUP_SIZE;
+        counters[INDIRECT_TRI_X] = triWGs;
+        counters[INDIRECT_TRI_Y] = 1u;
+        counters[INDIRECT_TRI_Z] = 1u;
     }
 }

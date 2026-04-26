@@ -552,6 +552,8 @@ static MeshMetrics computeMetrics(
         sumAspect += ar;
         validTris++;
     }
+    m.triCount = validTris;
+    m.reductionRatio = (originalTriCount > 0) ? (float)validTris / originalTriCount : 1.0f;
     if (validTris > 0) {
         m.avgMinAngleDeg = sumMinAngle / validTris;
         m.avgAspectRatio = sumAspect / validTris;
@@ -881,22 +883,26 @@ void App::runDecimation() {
             decimationPipelineLayout, 0, 2, sets, 0, nullptr);
     };
 
-    // --- Helper: compute->compute barrier ---
+    // --- Helper: compute->compute barrier (also covers indirect dispatch reads) ---
     auto computeBarrier = [&](VkCommandBuffer cmd) {
         VkMemoryBarrier barrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
         barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-        barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+        barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT
+            | VK_ACCESS_INDIRECT_COMMAND_READ_BIT;
         vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &barrier, 0, nullptr, 0, nullptr);
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT,
+            0, 1, &barrier, 0, nullptr, 0, nullptr);
     };
 
-    // --- Helper: transfer->compute barrier ---
+    // --- Helper: transfer->compute barrier (also covers indirect dispatch reads) ---
     auto transferToComputeBarrier = [&](VkCommandBuffer cmd) {
         VkMemoryBarrier barrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
         barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-        barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+        barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT
+            | VK_ACCESS_INDIRECT_COMMAND_READ_BIT;
         vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
-            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &barrier, 0, nullptr, 0, nullptr);
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT,
+            0, 1, &barrier, 0, nullptr, 0, nullptr);
     };
 
     // --- Helper: dispatch a pass ---
@@ -905,6 +911,24 @@ void App::runDecimation() {
         vkCmdPushConstants(cmd, decimationPipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT,
             0, sizeof(DecimationPushConstants), &pc);
         vkCmdDispatch(cmd, workgroups, 1, 1);
+    };
+
+    // Byte offsets into DB_COUNTER for VkDispatchIndirectCommand structs
+    const VkDeviceSize INDIRECT_TRI_OFFSET  = 8 * sizeof(uint32_t);   // counters[8..10]
+    const VkDeviceSize INDIRECT_EDGE_OFFSET = 12 * sizeof(uint32_t);  // counters[12..14]
+
+    auto dispatchIndirectTri = [&](VkCommandBuffer cmd, uint32_t passIdx, const DecimationPushConstants& pc) {
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, decimationPipelines[passIdx]);
+        vkCmdPushConstants(cmd, decimationPipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT,
+            0, sizeof(DecimationPushConstants), &pc);
+        vkCmdDispatchIndirect(cmd, decimationBufs[DB_COUNTER], INDIRECT_TRI_OFFSET);
+    };
+
+    auto dispatchIndirectEdge = [&](VkCommandBuffer cmd, uint32_t passIdx, const DecimationPushConstants& pc) {
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, decimationPipelines[passIdx]);
+        vkCmdPushConstants(cmd, decimationPipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT,
+            0, sizeof(DecimationPushConstants), &pc);
+        vkCmdDispatchIndirect(cmd, decimationBufs[DB_COUNTER], INDIRECT_EDGE_OFFSET);
     };
 
     // --- Helper: submit command buffer and wait ---
@@ -1110,6 +1134,13 @@ void App::runDecimation() {
                     2 * sizeof(uint32_t), sizeof(uint32_t), &initVals[0]);
                 vkCmdUpdateBuffer(cmd, decimationBufs[DB_COUNTER],
                     5 * sizeof(uint32_t), sizeof(uint32_t), &initVals[1]);
+
+                uint32_t triCmd[3] = { triDispatchWGs, 1, 1 };
+                uint32_t edgeCmd[3] = { edgeDispatchWGs, 1, 1 };
+                vkCmdUpdateBuffer(cmd, decimationBufs[DB_COUNTER],
+                    INDIRECT_TRI_OFFSET, sizeof(triCmd), triCmd);
+                vkCmdUpdateBuffer(cmd, decimationBufs[DB_COUNTER],
+                    INDIRECT_EDGE_OFFSET, sizeof(edgeCmd), edgeCmd);
             }
             submitAndWait(cmd);
 
@@ -1168,13 +1199,20 @@ void App::runDecimation() {
         vkCmdFillBuffer(cmd, decimationBufs[DB_TRI_EDGE], 0, decimationBufSizes[DB_TRI_EDGE], 0);  // valence
         vkCmdFillBuffer(cmd, decimationBufs[DB_QUADRIC], 0, decimationBufSizes[DB_QUADRIC], 0);
 
-        // Initialize COUNTER_TRIANGLE_COUNT and COUNTER_ALIVE_ESTIMATE on first iteration
+        // Initialize counters and indirect dispatch on first iteration
         if (iteration == 0) {
             uint32_t initVals[2] = { triCount, triCount };
             vkCmdUpdateBuffer(cmd, decimationBufs[DB_COUNTER],
                 2 * sizeof(uint32_t), sizeof(uint32_t), &initVals[0]);  // TRIANGLE_COUNT
             vkCmdUpdateBuffer(cmd, decimationBufs[DB_COUNTER],
                 5 * sizeof(uint32_t), sizeof(uint32_t), &initVals[1]);  // ALIVE_ESTIMATE
+
+            uint32_t triCmd[3] = { triDispatchWGs, 1, 1 };
+            uint32_t edgeCmd[3] = { edgeDispatchWGs, 1, 1 };
+            vkCmdUpdateBuffer(cmd, decimationBufs[DB_COUNTER],
+                INDIRECT_TRI_OFFSET, sizeof(triCmd), triCmd);
+            vkCmdUpdateBuffer(cmd, decimationBufs[DB_COUNTER],
+                INDIRECT_EDGE_OFFSET, sizeof(edgeCmd), edgeCmd);
         }
 
         transferToComputeBarrier(cmd);
@@ -1187,45 +1225,45 @@ void App::runDecimation() {
         };
 
         tsWrite(0);  // iteration start (after clears)
-        dispatchPass(cmd, 2, pc, triDispatchWGs);    // P3: build adjacency + valence
+        dispatchIndirectTri(cmd, 2, pc);              // P3: build adjacency + valence
         computeBarrier(cmd);
         tsWrite(1);
 
         if (!isLight) {
-            dispatchPass(cmd, 3, pc, triDispatchWGs);    // P4: build edges
+            dispatchPass(cmd, 3, pc, triDispatchWGs);    // P4: build edges (direct — sets EDGE_COUNT)
             computeBarrier(cmd);
         }
         tsWrite(2);
 
         if (!isLight) {
-            dispatchPass(cmd, 4, pc, edgeDispatchWGs);   // P4b: flag boundary
+            dispatchPass(cmd, 4, pc, edgeDispatchWGs);   // P4b: flag boundary (direct — writes edge indirect)
             computeBarrier(cmd);
         }
         tsWrite(3);
 
-        dispatchPass(cmd, 5, pc, triDispatchWGs);    // P5: quadrics + init triDescriptor
+        dispatchIndirectTri(cmd, 5, pc);              // P5: quadrics + init triDescriptor
         computeBarrier(cmd);
         tsWrite(4);
-        dispatchPass(cmd, 6, pc, edgeDispatchWGs);   // P6: cost + scatter (fused)
+        dispatchIndirectEdge(cmd, 6, pc);             // P6: cost + scatter (fused)
         computeBarrier(cmd);
         tsWrite(5);
-        dispatchPass(cmd, 7, pc, edgeDispatchWGs);   // P9: collapse + mark dirty
+        dispatchIndirectEdge(cmd, 7, pc);             // P9: collapse + mark dirty
         computeBarrier(cmd);
         tsWrite(6);
         if (isLight) {
-            dispatchPass(cmd, 8, pc, edgeDispatchWGs);   // P9b: patch edges (light only)
+            dispatchIndirectEdge(cmd, 8, pc);         // P9b: patch edges (light only)
             computeBarrier(cmd);
         }
         tsWrite(7);
-        dispatchPass(cmd, 9, pc, triDispatchWGs);    // P10: mark degenerate
+        dispatchIndirectTri(cmd, 9, pc);              // P10: mark degenerate
         computeBarrier(cmd);
         tsWrite(8);
 
         if (!isLight) {
-            dispatchPass(cmd, 10, pc, triDispatchWGs);   // P11: compact
+            dispatchIndirectTri(cmd, 10, pc);            // P11: compact
             computeBarrier(cmd);
             tsWrite(9);
-            dispatchPass(cmd, 11, pc, triDispatchWGs);   // P12: copyback
+            dispatchIndirectTri(cmd, 11, pc);            // P12: copyback (updates tri indirect)
             computeBarrier(cmd);
             // Reset aliveFlags after compaction (triangle indices were renumbered)
             vkCmdFillBuffer(cmd, decimationBufs[DB_ALIVE], 0, decimationBufSizes[DB_ALIVE], 1);
@@ -1795,12 +1833,22 @@ void App::initInteractiveDecimation() {
         dispatchPass(1, divUp(triCount, WORKGROUP_SIZE));
         computeBarrier();
 
-        // Initialize COUNTER_TRIANGLE_COUNT and COUNTER_ALIVE_ESTIMATE
+        // Initialize COUNTER_TRIANGLE_COUNT, COUNTER_ALIVE_ESTIMATE, and indirect dispatch
         uint32_t initVals[2] = { triCount, triCount };
         vkCmdUpdateBuffer(computeCommandBuffer, decimationBufs[DB_COUNTER],
             2 * sizeof(uint32_t), sizeof(uint32_t), &initVals[0]);
         vkCmdUpdateBuffer(computeCommandBuffer, decimationBufs[DB_COUNTER],
             5 * sizeof(uint32_t), sizeof(uint32_t), &initVals[1]);
+        {
+            const VkDeviceSize INDIRECT_TRI_OFFSET  = 8 * sizeof(uint32_t);
+            const VkDeviceSize INDIRECT_EDGE_OFFSET = 12 * sizeof(uint32_t);
+            uint32_t triCmd[3] = { divUp(triCount, (uint32_t)256), 1, 1 };
+            uint32_t edgeCmd[3] = { divUp(interactiveMaxEdges, (uint32_t)256), 1, 1 };
+            vkCmdUpdateBuffer(computeCommandBuffer, decimationBufs[DB_COUNTER],
+                INDIRECT_TRI_OFFSET, sizeof(triCmd), triCmd);
+            vkCmdUpdateBuffer(computeCommandBuffer, decimationBufs[DB_COUNTER],
+                INDIRECT_EDGE_OFFSET, sizeof(edgeCmd), edgeCmd);
+        }
         {
             VkMemoryBarrier barrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
             barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
@@ -1860,19 +1908,37 @@ void App::stepInteractiveDecimation() {
             0, sizeof(DecimationPushConstants), &pc);
         vkCmdDispatch(computeCommandBuffer, workgroups, 1, 1);
     };
+    const VkDeviceSize INDIRECT_TRI_OFFSET  = 8 * sizeof(uint32_t);
+    const VkDeviceSize INDIRECT_EDGE_OFFSET = 12 * sizeof(uint32_t);
+    auto dispatchIndirectTri = [&](uint32_t passIdx, const DecimationPushConstants& pc) {
+        vkCmdBindPipeline(computeCommandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, decimationPipelines[passIdx]);
+        vkCmdPushConstants(computeCommandBuffer, decimationPipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT,
+            0, sizeof(DecimationPushConstants), &pc);
+        vkCmdDispatchIndirect(computeCommandBuffer, decimationBufs[DB_COUNTER], INDIRECT_TRI_OFFSET);
+    };
+    auto dispatchIndirectEdge = [&](uint32_t passIdx, const DecimationPushConstants& pc) {
+        vkCmdBindPipeline(computeCommandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, decimationPipelines[passIdx]);
+        vkCmdPushConstants(computeCommandBuffer, decimationPipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT,
+            0, sizeof(DecimationPushConstants), &pc);
+        vkCmdDispatchIndirect(computeCommandBuffer, decimationBufs[DB_COUNTER], INDIRECT_EDGE_OFFSET);
+    };
     auto computeBarrier = [&]() {
         VkMemoryBarrier barrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
         barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-        barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+        barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT
+            | VK_ACCESS_INDIRECT_COMMAND_READ_BIT;
         vkCmdPipelineBarrier(computeCommandBuffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &barrier, 0, nullptr, 0, nullptr);
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT,
+            0, 1, &barrier, 0, nullptr, 0, nullptr);
     };
     auto transferToComputeBarrier = [&]() {
         VkMemoryBarrier barrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
         barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-        barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+        barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT
+            | VK_ACCESS_INDIRECT_COMMAND_READ_BIT;
         vkCmdPipelineBarrier(computeCommandBuffer, VK_PIPELINE_STAGE_TRANSFER_BIT,
-            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &barrier, 0, nullptr, 0, nullptr);
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT,
+            0, 1, &barrier, 0, nullptr, 0, nullptr);
     };
 
     bool isLight = (interactiveIteration > 0) && (interactiveIteration % decimationFullRebuildFreq != 0);
@@ -1903,30 +1969,30 @@ void App::stepInteractiveDecimation() {
     vkCmdFillBuffer(computeCommandBuffer, decimationBufs[DB_QUADRIC], 0, decimationBufSizes[DB_QUADRIC], 0);
     transferToComputeBarrier();
 
-    dispatchPass(2, pc, triDispatchWGs);    // build adjacency + valence
+    dispatchIndirectTri(2, pc);              // build adjacency + valence
     computeBarrier();
     if (!isLight) {
-        dispatchPass(3, pc, triDispatchWGs);    // build edges
+        dispatchPass(3, pc, triDispatchWGs);    // build edges (direct — sets EDGE_COUNT)
         computeBarrier();
-        dispatchPass(4, pc, edgeDispatchWGs);   // flag boundary
+        dispatchPass(4, pc, edgeDispatchWGs);   // flag boundary (direct — writes edge indirect)
         computeBarrier();
     }
-    dispatchPass(5, pc, triDispatchWGs);    // quadrics + init descriptors
+    dispatchIndirectTri(5, pc);              // quadrics + init descriptors
     computeBarrier();
-    dispatchPass(6, pc, edgeDispatchWGs);   // cost + scatter
+    dispatchIndirectEdge(6, pc);             // cost + scatter
     computeBarrier();
-    dispatchPass(7, pc, edgeDispatchWGs);   // collapse + mark dirty
+    dispatchIndirectEdge(7, pc);             // collapse + mark dirty
     computeBarrier();
     if (isLight) {
-        dispatchPass(8, pc, edgeDispatchWGs);   // patch edges (light only)
+        dispatchIndirectEdge(8, pc);         // patch edges (light only)
         computeBarrier();
     }
-    dispatchPass(9, pc, triDispatchWGs);    // mark degenerate
+    dispatchIndirectTri(9, pc);              // mark degenerate
     computeBarrier();
     if (!isLight) {
-        dispatchPass(10, pc, triDispatchWGs);   // compact
+        dispatchIndirectTri(10, pc);         // compact
         computeBarrier();
-        dispatchPass(11, pc, triDispatchWGs);   // copyback
+        dispatchIndirectTri(11, pc);         // copyback (updates tri indirect)
         computeBarrier();
         // Reset aliveFlags after compaction (triangle indices were renumbered)
         vkCmdFillBuffer(computeCommandBuffer, decimationBufs[DB_ALIVE], 0, decimationBufSizes[DB_ALIVE], 1);

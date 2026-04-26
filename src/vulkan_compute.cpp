@@ -411,7 +411,8 @@ void App::allocateDecimationBuffers(uint32_t vertCount, uint32_t triCount) {
     decimationBufSizes[DB_ALIVE]          = (VkDeviceSize)triCount * sizeof(uint32_t);
 
     VkBufferUsageFlags storageUsage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
-        | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+        | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT
+        | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT;
 
     decimationUseDeviceLocal = true;
     for (int i = 0; i < DB_COUNT; i++) {

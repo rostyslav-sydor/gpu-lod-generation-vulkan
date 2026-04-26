@@ -32,6 +32,15 @@ layout(local_size_x = WORKGROUP_SIZE) in;
 
 void main() {
     uint gid = gl_GlobalInvocationID.x;
+
+    // Thread 0: write edge indirect dispatch for subsequent passes (P6, P9, P9b)
+    if (gid == 0u) {
+        uint edgeWGs = (counters[COUNTER_EDGE_COUNT] + WORKGROUP_SIZE - 1u) / WORKGROUP_SIZE;
+        counters[INDIRECT_EDGE_X] = edgeWGs;
+        counters[INDIRECT_EDGE_Y] = 1u;
+        counters[INDIRECT_EDGE_Z] = 1u;
+    }
+
     if (gid >= counters[COUNTER_EDGE_COUNT]) return;
     if (counters[COUNTER_ALIVE_ESTIMATE] <= targetTriCount) return;
 
