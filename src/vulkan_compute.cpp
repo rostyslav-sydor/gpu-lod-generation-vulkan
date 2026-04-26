@@ -349,6 +349,7 @@ void App::createDecimationPipelines() {
         "04_build_edges", "04b_flag_boundary",
         "05_compute_quadrics", "06_compute_cost_and_scatter",
         "09_collapse_edges",
+        "09b_patch_edges",
         "10_mark_degenerate", "11_compact", "12_copy_back"
     };
 

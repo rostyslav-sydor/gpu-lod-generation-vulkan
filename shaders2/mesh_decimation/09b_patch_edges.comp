@@ -1,0 +1,216 @@
+#version 460
+#extension GL_EXT_shader_atomic_int64 : require
+
+// ============================================================================
+// Pass 9b: Patch Edge Data Structures After Collapse (light iterations only)
+//
+// Dispatch: ceil(maxEdges / WORKGROUP_SIZE) workgroups
+// Most threads early-exit; only collapsed-count threads do real work.
+//
+// For each edge that collapsed in Pass 9 (v1 merged into v0):
+//   1. Tombstone the collapsed edge (v0, v1) in the hash map
+//   2. Walk v1's pre-collapse adjacency ring
+//   3. For each neighboring edge (v1, x):
+//      - Tombstone old hash entry
+//      - If (v0, x) already exists: merge triangle adjacency, kill old edge
+//      - If (v0, x) doesn't exist: reinsert under new key, update edge in place
+//   4. Clean up degenerate triangle references in edgeTriangles[]
+//
+// This avoids the full edge rebuild (P4 + P4b) on light iterations by
+// incrementally maintaining edges[], edgeHashMap[], and edgeTriangles[].
+//
+// Prerequisites:
+//   - scanData[] contains collapsed edge IDs (written by P9)
+//   - counters[COUNTER_COLLAPSE_COUNT] = number of collapsed edges
+//   - adjHead[]/triAdjNext[] from P3 (pre-collapse topology for v1)
+//   - edges[], edgeHashMap[], edgeTriangles[] from previous full build
+//
+// Result:
+//   - edges[] updated: stale (v1, x) entries become (v0, x) or dead
+//   - edgeHashMap[] updated: old keys tombstoned, new keys inserted
+//   - edgeTriangles[] updated: degenerate triangles removed
+// ============================================================================
+
+#include "common.glsl"
+#include "bindings.glsl"
+
+layout(local_size_x = WORKGROUP_SIZE) in;
+
+// Find an edge in the hash map. Returns the slot index, or NONE if not found.
+uint findEdgeSlot(uint eMin, uint eMax) {
+    uint mask = hashMapSize - 1u;
+    uint h = hash_edge(eMin, eMax) & mask;
+
+    for (uint probe = 0u; probe < MAX_PROBES; probe++) {
+        uint s = (h + probe) & mask;
+        uint sx = edgeHashMap[s].x;
+
+        if (sx == HASHMAP_EMPTY) return NONE;
+        if (sx == HASHMAP_TOMBSTONE) continue;
+
+        if (sx == eMin && edgeHashMap[s].y == eMax) {
+            uint eidx = edgeHashMap[s].z;
+            if (eidx == HASHMAP_EMPTY) continue;
+            return s;
+        }
+    }
+    return NONE;
+}
+
+// Tombstone a hash map slot for edge (eMin, eMax). Returns the edge index, or NONE.
+uint tombstoneEdge(uint eMin, uint eMax) {
+    uint slot = findEdgeSlot(eMin, eMax);
+    if (slot == NONE) return NONE;
+
+    uint edgeIdx = edgeHashMap[slot].z;
+    edgeHashMap[slot].x = HASHMAP_TOMBSTONE;
+    return edgeIdx;
+}
+
+// Insert an edge into the hash map, reusing tombstoned slots.
+// Returns true on success.
+bool insertEdgeEntry(uint eMin, uint eMax, uint edgeIdx) {
+    uint mask = hashMapSize - 1u;
+    uint h = hash_edge(eMin, eMax) & mask;
+
+    for (uint probe = 0u; probe < MAX_PROBES; probe++) {
+        uint s = (h + probe) & mask;
+        uint sx = edgeHashMap[s].x;
+
+        if (sx == HASHMAP_EMPTY || sx == HASHMAP_TOMBSTONE) {
+            uint prev = atomicCompSwap(edgeHashMap[s].x, sx, eMin);
+            if (prev == sx) {
+                edgeHashMap[s].y = eMax;
+                edgeHashMap[s].z = edgeIdx;
+                return true;
+            }
+            // Another thread claimed this slot; keep probing
+            if (prev == HASHMAP_TOMBSTONE || prev == HASHMAP_EMPTY) continue;
+        }
+
+        // Check if already inserted (shouldn't happen but be safe)
+        if (sx == eMin && edgeHashMap[s].y == eMax) return true;
+    }
+    return false;
+}
+
+bool isTriangleDegenerate(uint triIdx) {
+    uint base = triIdx * 3u;
+    uint a = posIndices[base + 0u];
+    uint b = posIndices[base + 1u];
+    uint c = posIndices[base + 2u];
+    return (a == b) || (b == c) || (a == c);
+}
+
+void main() {
+    uint gid = gl_GlobalInvocationID.x;
+    uint collapsedCount = counters[COUNTER_COLLAPSE_COUNT];
+    if (gid >= collapsedCount) return;
+
+    uint edgeId = scanData[gid];
+    uvec2 edge = edges[edgeId];
+    uint v0 = edge.x;  // survivor (min vertex)
+    uint v1 = edge.y;  // merged away (max vertex, FLAG_COLLAPSED)
+
+    // --- Step 1: Tombstone the collapsed edge (v0, v1) itself ---
+    tombstoneEdge(min(v0, v1), max(v0, v1));
+    edges[edgeId] = uvec2(NONE, NONE);
+    edgeFlags[edgeId] = 0u;
+
+    // --- Step 2: Walk v1's adjacency ring, patch neighboring edges ---
+    // adjHead[v1] still points to v1's pre-collapse adjacency (built by P3 before P9).
+    // Each entry tells us: triangle index and which slot v1 occupied.
+    // The other two vertices in each triangle give us edges (v1, x) to patch.
+
+    // Track which "other" vertices we've already processed to avoid double-processing
+    // edges shared by two adjacent triangles. Use a simple linear scan of a small array
+    // since vertex valence is typically 5-7.
+    uint processedNeighbors[24];
+    uint processedCount = 0u;
+
+    uint idx = adjHead[v1];
+    while (idx != NONE) {
+        uint triIdx = idx / 3u;
+        uint slot = idx % 3u;
+        uint base = triIdx * 3u;
+
+        // Get the other two vertices of this triangle
+        // (posIndices already has v0 in place of v1 after collapse)
+        uint neighbors[2];
+        neighbors[0] = posIndices[base + (slot + 1u) % 3u];
+        neighbors[1] = posIndices[base + (slot + 2u) % 3u];
+
+        for (uint ni = 0u; ni < 2u; ni++) {
+            uint x = neighbors[ni];
+
+            // Skip v0 — the edge (v1, v0) is the collapsed edge, already handled
+            if (x == v0) continue;
+
+            // Skip already-processed neighbors
+            bool alreadyDone = false;
+            for (uint p = 0u; p < processedCount; p++) {
+                if (processedNeighbors[p] == x) { alreadyDone = true; break; }
+            }
+            if (alreadyDone) continue;
+            if (processedCount < 24u)
+                processedNeighbors[processedCount++] = x;
+
+            // Edge (v1, x) needs to become (v0, x)
+            uint oldMin = min(v1, x);
+            uint oldMax = max(v1, x);
+            uint newMin = min(v0, x);
+            uint newMax = max(v0, x);
+
+            // Tombstone old entry (v1, x)
+            uint oldEdgeIdx = tombstoneEdge(oldMin, oldMax);
+            if (oldEdgeIdx == NONE) continue;
+
+            // Check if (v0, x) already exists
+            uint existingSlot = findEdgeSlot(newMin, newMax);
+
+            if (existingSlot != NONE) {
+                // --- Duplicate case: (v0, x) already exists ---
+                uint existingIdx = edgeHashMap[existingSlot].z;
+
+                // Clean degenerate triangle refs from the existing edge too
+                for (uint ti = 0u; ti < 2u; ti++) {
+                    uint tri = edgeTriangles[existingIdx * 2u + ti];
+                    if (tri != NONE && isTriangleDegenerate(tri))
+                        edgeTriangles[existingIdx * 2u + ti] = NONE;
+                }
+
+                // Merge triangle adjacency: copy non-degenerate triangles
+                // from old edge into existing edge's empty slots
+                for (uint ti = 0u; ti < 2u; ti++) {
+                    uint tri = edgeTriangles[oldEdgeIdx * 2u + ti];
+                    if (tri == NONE) continue;
+                    if (isTriangleDegenerate(tri)) continue;
+
+                    // Try to fill the second slot of the existing edge
+                    atomicCompSwap(edgeTriangles[existingIdx * 2u + 1u], NONE, tri);
+                }
+
+                // Kill the old edge entry
+                edges[oldEdgeIdx] = uvec2(NONE, NONE);
+                edgeFlags[oldEdgeIdx] = 0u;
+                edgeTriangles[oldEdgeIdx * 2u + 0u] = NONE;
+                edgeTriangles[oldEdgeIdx * 2u + 1u] = NONE;
+
+            } else {
+                // --- Rename case: reinsert as (v0, x) ---
+                insertEdgeEntry(newMin, newMax, oldEdgeIdx);
+                edges[oldEdgeIdx] = uvec2(newMin, newMax);
+
+                // Clean up degenerate triangle references
+                for (uint ti = 0u; ti < 2u; ti++) {
+                    uint tri = edgeTriangles[oldEdgeIdx * 2u + ti];
+                    if (tri != NONE && isTriangleDegenerate(tri)) {
+                        edgeTriangles[oldEdgeIdx * 2u + ti] = NONE;
+                    }
+                }
+            }
+        }
+
+        idx = triAdjNext[idx];
+    }
+}

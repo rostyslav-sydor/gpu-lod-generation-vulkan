@@ -756,8 +756,8 @@ void App::printDecimationMetrics() {
             std::ofstream csv(path, std::ios::app);
             if (!exists) {
                 csv << "run_id,iteration,edges,eligible,collapses,tri_after,iter_gpu_ms,"
-                       "build_adj_ms,build_edges_ms,quadrics_ms,cost_scatter_ms,"
-                       "collapse_ms,mark_degen_ms,compact_ms,copyback_ms\n";
+                       "build_adj_ms,build_edges_ms,flag_bndry_ms,quadrics_ms,cost_scatter_ms,"
+                       "collapse_ms,patch_edges_ms,mark_degen_ms,compact_ms,copyback_ms\n";
             }
             for (size_t i = 0; i < logIterData.size(); i++) {
                 csv << runId << ","
@@ -767,7 +767,7 @@ void App::printDecimationMetrics() {
                     << logIterData[i].collapses << ","
                     << logIterData[i].triangles << ","
                     << std::fixed << std::setprecision(4) << logIterData[i].gpu_ms;
-                for (int p = 0; p < 8; p++)
+                for (int p = 0; p < 10; p++)
                     csv << "," << std::setprecision(4) << logIterData[i].pass_ms[p];
                 csv << std::defaultfloat << "\n";
             }
@@ -995,11 +995,12 @@ void App::runDecimation() {
     // ======================================================================
     // Phase 2: Iterative decimation loop (batched)
     // ======================================================================
-    // Pipeline indices (11 total):
+    // Pipeline indices (12 total):
     //   0: hash_vertices   1: dedup_indices   2: build_adjacency  3: build_edges
     //   4: flag_boundary   5: compute_quadrics (+ init descriptors)
     //   6: compute_cost_and_scatter (fused P6+P8)
-    //   7: collapse_edges   8: mark_degenerate   9: compact   10: copy_back
+    //   7: collapse_edges  8: patch_edges (light only)
+    //   9: mark_degenerate  10: compact   11: copy_back
     //
     // Shaders read triCount from counters[COUNTER_TRIANGLE_COUNT] on the GPU,
     // so we can record many iterations into one command buffer without CPU sync.
@@ -1011,8 +1012,8 @@ void App::runDecimation() {
 
     // Per-iteration logging resources (only when DECIM_LOG=1)
     const uint32_t COUNTERS_PER_ITER = 5;
-    const uint32_t PASSES_PER_ITER = 9;
-    const uint32_t TS_PER_ITER = PASSES_PER_ITER + 1; // 1 start + 9 pass ends
+    const uint32_t PASSES_PER_ITER = 10;
+    const uint32_t TS_PER_ITER = PASSES_PER_ITER + 1; // 1 start + 10 pass ends
     VkBuffer iterStatsBuf = VK_NULL_HANDLE;
     VkDeviceMemory iterStatsMem = VK_NULL_HANDLE;
     VkQueryPool iterTimestampPool = VK_NULL_HANDLE;
@@ -1072,19 +1073,20 @@ void App::runDecimation() {
             const char* passNames[] = {
                 "P3:adjacency", "P4:edges", "P4b:boundary",
                 "P5:quadrics", "P6:cost+scatter", "P7:collapse",
-                "P8:mark_degen", "P9:compact", "P10:copyback"
+                "P7b:patch_edges", "P8:mark_degen", "P9:compact", "P10:copyback"
             };
-            struct PassInfo { uint32_t pipeIdx; uint32_t wgs; bool skipIfLight; };
+            struct PassInfo { uint32_t pipeIdx; uint32_t wgs; bool skipIfLight; bool lightOnly; };
             PassInfo passes[] = {
-                {2, triDispatchWGs, false},   // P3
-                {3, triDispatchWGs, true},    // P4
-                {4, edgeDispatchWGs, true},   // P4b
-                {5, triDispatchWGs, false},   // P5
-                {6, edgeDispatchWGs, false},  // P6
-                {7, edgeDispatchWGs, false},  // P7 (collapse)
-                {8, triDispatchWGs, false},   // P8 (mark degen)
-                {9, triDispatchWGs, true},    // P9 (compact)
-                {10, triDispatchWGs, true},   // P10 (copyback)
+                {2, triDispatchWGs, false, false},   // P3
+                {3, triDispatchWGs, true, false},     // P4
+                {4, edgeDispatchWGs, true, false},    // P4b
+                {5, triDispatchWGs, false, false},    // P5
+                {6, edgeDispatchWGs, false, false},   // P6
+                {7, edgeDispatchWGs, false, false},   // P7 (collapse)
+                {8, edgeDispatchWGs, false, true},    // P7b (patch edges — light only)
+                {9, triDispatchWGs, false, false},    // P8 (mark degen)
+                {10, triDispatchWGs, true, false},    // P9 (compact)
+                {11, triDispatchWGs, true, false},    // P10 (copyback)
             };
 
             // Fills in their own submission
@@ -1108,8 +1110,9 @@ void App::runDecimation() {
             }
             submitAndWait(cmd);
 
-            for (int p = 0; p < 9; p++) {
+            for (int p = 0; p < 10; p++) {
                 if (passes[p].skipIfLight && isLight) continue;
+                if (passes[p].lightOnly && !isLight) continue;
                 std::cerr << "  [DEBUG] iter=" << iteration << " " << passNames[p] << " ..." << std::flush;
                 cmd = beginCmd();
                 transferToComputeBarrier(cmd);
@@ -1203,22 +1206,27 @@ void App::runDecimation() {
         dispatchPass(cmd, 7, pc, edgeDispatchWGs);   // P9: collapse + mark dirty
         computeBarrier(cmd);
         tsWrite(6);
-        dispatchPass(cmd, 8, pc, triDispatchWGs);    // P10: mark degenerate
-        computeBarrier(cmd);
+        if (isLight) {
+            dispatchPass(cmd, 8, pc, edgeDispatchWGs);   // P9b: patch edges (light only)
+            computeBarrier(cmd);
+        }
         tsWrite(7);
+        dispatchPass(cmd, 9, pc, triDispatchWGs);    // P10: mark degenerate
+        computeBarrier(cmd);
+        tsWrite(8);
 
         if (!isLight) {
-            dispatchPass(cmd, 9, pc, triDispatchWGs);    // P11: compact
+            dispatchPass(cmd, 10, pc, triDispatchWGs);   // P11: compact
             computeBarrier(cmd);
-            tsWrite(8);
-            dispatchPass(cmd, 10, pc, triDispatchWGs);   // P12: copyback
+            tsWrite(9);
+            dispatchPass(cmd, 11, pc, triDispatchWGs);   // P12: copyback
             computeBarrier(cmd);
             // Reset aliveFlags after compaction (triangle indices were renumbered)
             vkCmdFillBuffer(cmd, decimationBufs[DB_ALIVE], 0, decimationBufSizes[DB_ALIVE], 1);
-            tsWrite(9);
+            tsWrite(10);
         } else {
-            tsWrite(8);
             tsWrite(9);
+            tsWrite(10);
         }
 
         if (decimationLogEnabled) {
@@ -1286,7 +1294,7 @@ void App::runDecimation() {
     struct IterStats {
         uint32_t edges, collapses, triangles, eligible, compacted;
         double gpu_ms;
-        double pass_ms[9]; // per-pass GPU time
+        double pass_ms[10]; // per-pass GPU time
     };
     std::vector<IterStats> iterData;
     if (decimationLogEnabled) {
@@ -1326,7 +1334,7 @@ void App::runDecimation() {
         // Print per-pass average breakdown
         const char* passNames[] = {
             "build_adj", "build_edges", "flag_bndry", "quadrics", "cost+scatter",
-            "collapse", "mark_degen", "compact", "copyback"
+            "collapse", "patch_edges", "mark_degen", "compact", "copyback"
         };
         double avgPass[PASSES_PER_ITER] = {};
         for (auto& it : iterData)
@@ -1485,7 +1493,7 @@ void App::runDecimation() {
             logIterData[i].eligible  = iterData[i].eligible;
             logIterData[i].compacted = iterData[i].compacted;
             logIterData[i].gpu_ms    = iterData[i].gpu_ms;
-            for (int p = 0; p < 8; p++) logIterData[i].pass_ms[p] = iterData[i].pass_ms[p];
+            for (int p = 0; p < 10; p++) logIterData[i].pass_ms[p] = iterData[i].pass_ms[p];
         }
         logGpuMs = totalGpuMs;
         logTotalUs = totalUs;
@@ -1894,12 +1902,16 @@ void App::stepInteractiveDecimation() {
     computeBarrier();
     dispatchPass(7, pc, edgeDispatchWGs);   // collapse + mark dirty
     computeBarrier();
-    dispatchPass(8, pc, triDispatchWGs);    // mark degenerate
+    if (isLight) {
+        dispatchPass(8, pc, edgeDispatchWGs);   // patch edges (light only)
+        computeBarrier();
+    }
+    dispatchPass(9, pc, triDispatchWGs);    // mark degenerate
     computeBarrier();
     if (!isLight) {
-        dispatchPass(9, pc, triDispatchWGs);    // compact
+        dispatchPass(10, pc, triDispatchWGs);   // compact
         computeBarrier();
-        dispatchPass(10, pc, triDispatchWGs);   // copyback
+        dispatchPass(11, pc, triDispatchWGs);   // copyback
         computeBarrier();
         // Reset aliveFlags after compaction (triangle indices were renumbered)
         vkCmdFillBuffer(computeCommandBuffer, decimationBufs[DB_ALIVE], 0, decimationBufSizes[DB_ALIVE], 1);

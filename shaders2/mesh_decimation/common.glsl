@@ -10,7 +10,8 @@
 #define WORKGROUP_SIZE 256
 #define NONE 0xFFFFFFFFu
 #define MAX_PROBES 128
-#define HASHMAP_EMPTY 0xFFFFFFFFu
+#define HASHMAP_EMPTY     0xFFFFFFFFu
+#define HASHMAP_TOMBSTONE 0xFFFFFFFEu
 
 // Counter indices in the counters[] SSBO
 #define COUNTER_EDGE_COUNT      0

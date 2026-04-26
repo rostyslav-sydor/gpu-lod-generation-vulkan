@@ -148,6 +148,9 @@ void main() {
     uint v0 = edge.x;
     uint v1 = edge.y;
 
+    // Skip dead edges (killed by P9b patch pass)
+    if (v0 == NONE || v1 == NONE) return;
+
     // Light iterations: reuse previous cost for clean edges (neither endpoint dirty)
     if (lightIteration != 0u) {
         bool dirty = (posMap[v0] == iteration) || (posMap[v1] == iteration);

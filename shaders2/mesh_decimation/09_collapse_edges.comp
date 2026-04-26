@@ -118,6 +118,8 @@ void main() {
     markDirtyRing(v0, dirtyGen);
     markDirtyRing(v1, dirtyGen);
 
-    // Increment collapse counter
-    atomicAdd(counters[COUNTER_COLLAPSE_COUNT], 1u);
+    // Append to collapsed-edges list (reuses scanData[] as append buffer)
+    // and increment collapse counter in one shot
+    uint collapseIdx = atomicAdd(counters[COUNTER_COLLAPSE_COUNT], 1u);
+    scanData[collapseIdx] = gid;
 }
