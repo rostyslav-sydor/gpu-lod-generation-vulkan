@@ -1072,6 +1072,7 @@ void App::runDecimation() {
     }
 
     const uint32_t fullRebuildFreq = decimationFullRebuildFreq;
+    const uint32_t compactFreq = decimationCompactFreq;
     const bool debugSync = (std::getenv("DECIM_DEBUG") && std::string(std::getenv("DECIM_DEBUG")) != "0");
 
     if (debugSync) {
@@ -1080,6 +1081,7 @@ void App::runDecimation() {
 
     for (uint32_t iteration = 0; iteration < maxDecimationIterations; iteration++) {
         bool isLight = (iteration > 0) && (iteration % fullRebuildFreq != 0);
+        bool doCompact = !isLight || (iteration % compactFreq == 0);
 
         DecimationPushConstants pc{};
         pc.vertexCount = vertCount;
@@ -1100,18 +1102,18 @@ void App::runDecimation() {
                 "P5:quadrics", "P6:cost+scatter", "P7:collapse",
                 "P7b:patch_edges", "P8:mark_degen", "P9:compact", "P10:copyback"
             };
-            struct PassInfo { uint32_t pipeIdx; uint32_t wgs; bool skipIfLight; bool lightOnly; };
+            struct PassInfo { uint32_t pipeIdx; uint32_t wgs; bool skipIfLight; bool lightOnly; bool needsCompact; };
             PassInfo passes[] = {
-                {2, triDispatchWGs, false, false},   // P3
-                {3, triDispatchWGs, true, false},     // P4
-                {4, edgeDispatchWGs, true, false},    // P4b
-                {5, triDispatchWGs, false, false},    // P5
-                {6, edgeDispatchWGs, false, false},   // P6
-                {7, edgeDispatchWGs, false, false},   // P7 (collapse)
-                {8, edgeDispatchWGs, false, true},    // P7b (patch edges — light only)
-                {9, triDispatchWGs, false, false},    // P8 (mark degen)
-                {10, triDispatchWGs, false, false},   // P9 (compact — always)
-                {11, triDispatchWGs, false, false},   // P10 (copyback — always)
+                {2, triDispatchWGs, false, false, false},  // P3
+                {3, triDispatchWGs, true, false, false},   // P4
+                {4, edgeDispatchWGs, true, false, false},  // P4b
+                {5, triDispatchWGs, false, false, false},  // P5
+                {6, edgeDispatchWGs, false, false, false},  // P6
+                {7, edgeDispatchWGs, false, false, false},  // P7 (collapse)
+                {8, edgeDispatchWGs, false, true, false},   // P7b (patch edges — light only)
+                {9, triDispatchWGs, false, false, false},   // P8 (mark degen)
+                {10, triDispatchWGs, false, false, true},   // P9 (compact)
+                {11, triDispatchWGs, false, false, true},   // P10 (copyback)
             };
 
             // Fills in their own submission
@@ -1147,6 +1149,7 @@ void App::runDecimation() {
             for (int p = 0; p < 10; p++) {
                 if (passes[p].skipIfLight && isLight) continue;
                 if (passes[p].lightOnly && !isLight) continue;
+                if (passes[p].needsCompact && !doCompact) continue;
                 std::cerr << "  [DEBUG] iter=" << iteration << " " << passNames[p] << " ..." << std::flush;
                 cmd = beginCmd();
                 transferToComputeBarrier(cmd);
@@ -1174,10 +1177,12 @@ void App::runDecimation() {
                 std::cerr << "\n";
             }
 
-            cmd = beginCmd();
-            vkCmdFillBuffer(cmd, decimationBufs[DB_ALIVE], 0, decimationBufSizes[DB_ALIVE], 1);
-            vkCmdFillBuffer(cmd, decimationBufs[DB_COUNTER], 4, 4, 0);  // clear COLLAPSE_COUNT
-            submitAndWait(cmd);
+            if (doCompact) {
+                cmd = beginCmd();
+                vkCmdFillBuffer(cmd, decimationBufs[DB_ALIVE], 0, decimationBufSizes[DB_ALIVE], 1);
+                vkCmdFillBuffer(cmd, decimationBufs[DB_COUNTER], 4, 4, 0);
+                submitAndWait(cmd);
+            }
 
             cmd = beginCmd();
             continue;
@@ -1257,16 +1262,19 @@ void App::runDecimation() {
         computeBarrier(cmd);
         tsWrite(8);
 
-        dispatchIndirectTri(cmd, 10, pc);            // P11: compact (always)
-        computeBarrier(cmd);
-        tsWrite(9);
-        dispatchIndirectTri(cmd, 11, pc);            // P12: copyback (updates tri indirect)
-        computeBarrier(cmd);
-        // Reset aliveFlags after compaction (triangle indices were renumbered)
-        vkCmdFillBuffer(cmd, decimationBufs[DB_ALIVE], 0, decimationBufSizes[DB_ALIVE], 1);
-        // P12 set TRIANGLE_COUNT = COMPACT_COUNT. Clear COLLAPSE_COUNT to prevent double-subtract.
-        vkCmdFillBuffer(cmd, decimationBufs[DB_COUNTER], 4, 4, 0);
-        tsWrite(10);
+        if (doCompact) {
+            dispatchIndirectTri(cmd, 10, pc);        // P11: compact
+            computeBarrier(cmd);
+            tsWrite(9);
+            dispatchIndirectTri(cmd, 11, pc);        // P12: copyback (updates tri indirect)
+            computeBarrier(cmd);
+            vkCmdFillBuffer(cmd, decimationBufs[DB_ALIVE], 0, decimationBufSizes[DB_ALIVE], 1);
+            vkCmdFillBuffer(cmd, decimationBufs[DB_COUNTER], 4, 4, 0);  // clear COLLAPSE_COUNT
+            tsWrite(10);
+        } else {
+            tsWrite(9);
+            tsWrite(10);
+        }
 
         if (decimationLogEnabled) {
             VkMemoryBarrier barrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
@@ -1934,6 +1942,7 @@ void App::stepInteractiveDecimation() {
     };
 
     bool isLight = (interactiveIteration > 0) && (interactiveIteration % decimationFullRebuildFreq != 0);
+    bool doCompact = !isLight || (interactiveIteration % decimationCompactFreq == 0);
 
     DecimationPushConstants pc{};
     pc.vertexCount = vertCount;
@@ -1981,14 +1990,14 @@ void App::stepInteractiveDecimation() {
     }
     dispatchIndirectTri(9, pc);              // mark degenerate
     computeBarrier();
-    dispatchIndirectTri(10, pc);             // compact (always)
-    computeBarrier();
-    dispatchIndirectTri(11, pc);             // copyback (updates tri indirect)
-    computeBarrier();
-    // Reset aliveFlags after compaction
-    vkCmdFillBuffer(computeCommandBuffer, decimationBufs[DB_ALIVE], 0, decimationBufSizes[DB_ALIVE], 1);
-    // Clear COLLAPSE_COUNT to prevent double-subtract
-    vkCmdFillBuffer(computeCommandBuffer, decimationBufs[DB_COUNTER], 4, 4, 0);
+    if (doCompact) {
+        dispatchIndirectTri(10, pc);         // compact
+        computeBarrier();
+        dispatchIndirectTri(11, pc);         // copyback (updates tri indirect)
+        computeBarrier();
+        vkCmdFillBuffer(computeCommandBuffer, decimationBufs[DB_ALIVE], 0, decimationBufSizes[DB_ALIVE], 1);
+        vkCmdFillBuffer(computeCommandBuffer, decimationBufs[DB_COUNTER], 4, 4, 0);
+    }
 
     vkEndCommandBuffer(computeCommandBuffer);
     VkSubmitInfo submitInfo{VK_STRUCTURE_TYPE_SUBMIT_INFO};
