@@ -1142,6 +1142,7 @@ void App::runDecimation() {
             if (!isLight) {
                 cmd = beginCmd();
                 vkCmdFillBuffer(cmd, decimationBufs[DB_ALIVE], 0, decimationBufSizes[DB_ALIVE], 1);
+                vkCmdFillBuffer(cmd, decimationBufs[DB_COUNTER], 4, 4, 0);  // clear COLLAPSE_COUNT
                 submitAndWait(cmd);
             }
 
@@ -1223,6 +1224,9 @@ void App::runDecimation() {
             computeBarrier(cmd);
             // Reset aliveFlags after compaction (triangle indices were renumbered)
             vkCmdFillBuffer(cmd, decimationBufs[DB_ALIVE], 0, decimationBufSizes[DB_ALIVE], 1);
+            // P12 set TRIANGLE_COUNT = COMPACT_COUNT (already accounts for collapses).
+            // Clear COLLAPSE_COUNT so the next light iter's P3 doesn't double-subtract.
+            vkCmdFillBuffer(cmd, decimationBufs[DB_COUNTER], 4, 4, 0);
             tsWrite(10);
         } else {
             tsWrite(9);
@@ -1915,6 +1919,8 @@ void App::stepInteractiveDecimation() {
         computeBarrier();
         // Reset aliveFlags after compaction (triangle indices were renumbered)
         vkCmdFillBuffer(computeCommandBuffer, decimationBufs[DB_ALIVE], 0, decimationBufSizes[DB_ALIVE], 1);
+        // Clear COLLAPSE_COUNT so P3 on next light iteration doesn't double-subtract
+        vkCmdFillBuffer(computeCommandBuffer, decimationBufs[DB_COUNTER], 4, 4, 0);
     }
 
     vkEndCommandBuffer(computeCommandBuffer);
