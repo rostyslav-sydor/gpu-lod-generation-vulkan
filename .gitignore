@@ -1,0 +1,5 @@
+*.spv
+*.patch
+VulkanLOD
+references/
+Glykon*

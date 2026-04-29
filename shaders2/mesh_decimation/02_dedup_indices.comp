@@ -1,0 +1,74 @@
+#version 460
+#extension GL_EXT_shader_atomic_int64 : require
+
+// ============================================================================
+// Pass 2: Deduplicate Index Buffers
+// 1 thread per triangle.
+//
+// Phase A: Remap IB using vertexMap (full attribute dedup).
+// Phase B: Build position-only hash map, generate PB, flag discontinuities.
+//
+// ============================================================================
+
+#include "common.glsl"
+#include "bindings.glsl"
+
+layout(local_size_x = WORKGROUP_SIZE) in;
+
+void main() {
+    uint gid = gl_GlobalInvocationID.x;
+    if (gid >= triangleCount) return;
+
+    uint baseIdx = gid * 3u;
+
+    for (uint i = 0u; i < 3u; i++) {
+        uint origIdx = indices[baseIdx + i];
+        uint canonical = vertexMap[origIdx];
+        indices[baseIdx + i] = canonical;
+    }
+
+    for (uint i = 0u; i < 3u; i++) {
+        uint vertIdx = indices[baseIdx + i];
+        Vertex v = loadVertex(vertIdx);
+
+        uint key = hash_position(v.pos);
+        uint mask = hashMapSize - 1u;
+        uint slot = key & mask;
+
+        uint posCanonical = vertIdx;
+
+        for (uint probe = 0u; probe < MAX_PROBES; probe++) {
+            uint s = (slot + probe) & mask;
+
+            uint prev = atomicCompSwap(positionHashMap[s].x, HASHMAP_EMPTY, key);
+
+            if (prev == HASHMAP_EMPTY) {
+                positionHashMap[s].y = vertIdx;
+                posCanonical = vertIdx;
+                break;
+            }
+
+            if (prev == key) {
+                memoryBarrierBuffer();
+                uint existingIdx = positionHashMap[s].y;
+
+                if (existingIdx == HASHMAP_EMPTY) continue;
+
+                Vertex existing = loadVertex(existingIdx);
+
+                if (positions_equal(v.pos, existing.pos)) {
+                    posCanonical = existingIdx;
+
+                    if (vertIdx != existingIdx) {
+                        atomicOr(vertexFlags[vertIdx], FLAG_DISCONTINUITY);
+                        atomicOr(vertexFlags[existingIdx], FLAG_DISCONTINUITY);
+                    }
+                    break;
+                }
+            }
+        }
+
+        posIndices[baseIdx + i] = posCanonical;
+        posMap[vertIdx] = posCanonical;
+    }
+}

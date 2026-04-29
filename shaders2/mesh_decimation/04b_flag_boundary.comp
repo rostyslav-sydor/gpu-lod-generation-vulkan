@@ -1,0 +1,62 @@
+#version 460
+#extension GL_EXT_shader_atomic_int64 : require
+
+// ============================================================================
+// Pass 4b: Flag Boundary Vertices (+ boundary quadrics on iteration 0)
+// 1 thread per edge.
+//
+// Pass 4 records edgeTriangles[e*2+1] == NONE for boundary edges, this pass
+// read that data to set boundary flags.
+//
+// On iteration 0 with QEM, also computes boundary quadric contributions
+// (wall planes perpendicular to boundary edges).
+//
+// Prerequisites:
+//   - edges[], edgeTriangles[] from Pass 4
+//   - posIndices[], vertexData[] populated
+//   - quadricsData[] cleared (for iteration 0 boundary quadrics)
+//
+// Result:
+//   - vertexFlags[v] |= FLAG_BOUNDARY for boundary edge endpoints
+//   - quadricsData[] += boundary quadrics (iteration 0, QEM only)
+// ============================================================================
+
+#include "common.glsl"
+#include "bindings.glsl"
+
+layout(local_size_x = WORKGROUP_SIZE) in;
+
+void main() {
+    uint gid = gl_GlobalInvocationID.x;
+    if (gid >= counters[COUNTER_EDGE_COUNT]) return;
+    if (counters[COUNTER_TRIANGLE_COUNT] <= targetTriCount) return;
+
+    if (edgeTriangles[gid * 2u + 1u] != NONE) return;
+
+    uint v0 = edges[gid].x;
+    uint v1 = edges[gid].y;
+
+    atomicOr(vertexFlags[v0], FLAG_BOUNDARY);
+    atomicOr(vertexFlags[v1], FLAG_BOUNDARY);
+
+    if (costMode == COST_MODE_QEM) {
+        uint triIdx = edgeTriangles[gid * 2u + 0u];
+        uint base = triIdx * 3u;
+        uint ti0 = posIndices[base + 0u];
+        uint ti1 = posIndices[base + 1u];
+        uint ti2 = posIndices[base + 2u];
+
+        vec3 p0 = loadVertex(v0).pos;
+        vec3 p1 = loadVertex(v1).pos;
+
+        uint v2;
+        if      (ti0 != v0 && ti0 != v1) v2 = ti0;
+        else if (ti1 != v0 && ti1 != v1) v2 = ti1;
+        else                              v2 = ti2;
+        vec3 p2 = loadVertex(v2).pos;
+
+        Quadric bq = quadric_from_triangle_edge(p0, p1, p2, 10.0);
+        atomicAddQuadric(v0, bq);
+        atomicAddQuadric(v1, bq);
+    }
+}

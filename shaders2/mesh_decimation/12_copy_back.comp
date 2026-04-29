@@ -1,0 +1,53 @@
+#version 460
+#extension GL_EXT_shader_atomic_int64 : require
+
+// ============================================================================
+// Pass 12: Copy Compacted Buffers Back + Update Triangle Count
+// 1 thread per triangle.
+//
+// Copies the compacted indices from the temporary scanData[] region back
+// into the primary indices[] and posIndices[] buffers. Also updates the
+// triangle count for the next iteration.
+//
+// The new triangle count is read from counters[COUNTER_COMPACT_COUNT].
+//
+// Prerequisites:
+//   - scanData[] populated with compacted indices from Pass 11
+//   - counters[COUNTER_COMPACT_COUNT] = new triangle count
+//   - triangleCount push constant = OLD triangle count (for offset calc)
+//
+// Result:
+//   - indices[] and posIndices[] contain compacted data
+//   - counters[COUNTER_TRIANGLE_COUNT] = new triangle count
+// ============================================================================
+
+#include "common.glsl"
+#include "bindings.glsl"
+
+layout(local_size_x = WORKGROUP_SIZE) in;
+
+void main() {
+    // do NOT early exit
+    uint newTriCount = counters[COUNTER_COMPACT_COUNT];
+
+    uint gid = gl_GlobalInvocationID.x;
+    if (gid >= newTriCount) return;
+
+    uint indicesOffset = 0u;
+    uint posIndicesOffset = triangleCount * 3u;
+
+    uint base = gid * 3u;
+
+    indices[base + 0u]    = scanData[indicesOffset + base + 0u];
+    indices[base + 1u]    = scanData[indicesOffset + base + 1u];
+    indices[base + 2u]    = scanData[indicesOffset + base + 2u];
+
+    posIndices[base + 0u] = scanData[posIndicesOffset + base + 0u];
+    posIndices[base + 1u] = scanData[posIndicesOffset + base + 1u];
+    posIndices[base + 2u] = scanData[posIndicesOffset + base + 2u];
+
+    if (gid == 0u) {
+        counters[COUNTER_TRIANGLE_COUNT] = newTriCount;
+        counters[COUNTER_ALIVE_ESTIMATE] = newTriCount;
+    }
+}

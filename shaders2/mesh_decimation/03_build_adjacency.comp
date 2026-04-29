@@ -1,0 +1,50 @@
+#version 460
+#extension GL_EXT_shader_atomic_int64 : require
+
+// ============================================================================
+// Pass 3: Build Per-Vertex Adjacency Lists (linked list) + Count Valence
+// 1 thread per triangle.
+//
+// For each triangle in PB, prepends each vertex-triangle pair to the
+// per-vertex linked list using atomicExchange on adjHead[v].
+// Also counts per-vertex valence (number of adjacent triangles) via
+// atomicAdd, eliminating the need for adjacency walks in Pass 6.
+//
+// Prerequisites:
+//   - adjHead[] must be cleared to NONE (0xFFFFFFFF) before dispatch.
+//   - valence[] must be cleared to 0 before dispatch.
+//   - posIndices[] (PB) must be populated from Pass 2.
+//
+// Result:
+//   adjHead[v] = head index of linked list for vertex v
+//   triAdjNext[triIdx*3+k] = next index in list (previous head)
+//   valence[v] = number of adjacent triangles for vertex v
+//
+// Traversal: idx = adjHead[v]; while (idx != NONE) { triIdx = idx/3;
+//            slot = idx%3; ...; idx = triAdjNext[idx]; }
+// ============================================================================
+
+#include "common.glsl"
+#include "bindings.glsl"
+
+layout(local_size_x = WORKGROUP_SIZE) in;
+
+void main() {
+    uint gid = gl_GlobalInvocationID.x;
+    if (gid >= counters[COUNTER_TRIANGLE_COUNT]) return;
+    if (counters[COUNTER_TRIANGLE_COUNT] <= targetTriCount) return;
+
+    if (aliveFlags[gid] == 0u) return;
+
+    uint baseIdx = gid * 3u;
+
+    for (uint k = 0u; k < 3u; k++) {
+        uint vertIdx = posIndices[baseIdx + k];
+        uint entry = baseIdx + k;
+        uint oldHead = atomicExchange(adjHead[vertIdx], entry);
+        triAdjNext[entry] = oldHead;
+        uint oldVal = atomicAdd(valence[vertIdx], 1u);
+        if (oldVal == 0u)
+            atomicAdd(counters[COUNTER_VERTEX_ACTIVE], 1u);
+    }
+}

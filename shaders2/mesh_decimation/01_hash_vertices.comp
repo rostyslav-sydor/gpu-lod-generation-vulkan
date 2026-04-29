@@ -1,0 +1,54 @@
+#version 460
+#extension GL_EXT_shader_atomic_int64 : require
+
+// ============================================================================
+// Pass 1: Hash Vertices (Full Attribute Deduplication)
+// 1 thread per vertex.
+//
+// Inserts each vertex into a hash map keyed by all attributes (pos + normal).
+// Produces vertexMap[i] = canonical index for vertex i.
+// ============================================================================
+
+#include "common.glsl"
+#include "bindings.glsl"
+
+layout(local_size_x = WORKGROUP_SIZE) in;
+
+void main() {
+    uint gid = gl_GlobalInvocationID.x;
+    if (gid >= vertexCount) return;
+
+    Vertex v = loadVertex(gid);
+
+    uint key = hash_vertex(v);
+    uint mask = hashMapSize - 1u;
+    uint slot = key & mask;
+
+    for (uint probe = 0u; probe < MAX_PROBES; probe++) {
+        uint s = (slot + probe) & mask;
+
+        uint prev = atomicCompSwap(vertexHashMap[s].x, HASHMAP_EMPTY, key);
+
+        if (prev == HASHMAP_EMPTY) {
+            vertexHashMap[s].y = gid;
+            vertexMap[gid] = gid;
+            return;
+        }
+
+        if (prev == key) {
+            memoryBarrierBuffer();
+            uint canonical = vertexHashMap[s].y;
+
+            if (canonical == HASHMAP_EMPTY) continue;
+
+            Vertex existing = loadVertex(canonical);
+            if (vertices_equal(v, existing)) {
+                vertexMap[gid] = canonical;
+                return;
+            }
+        }
+    }
+
+    // fallback
+    vertexMap[gid] = gid;
+}

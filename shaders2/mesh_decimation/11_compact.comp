@@ -1,0 +1,105 @@
+#version 460
+#extension GL_EXT_shader_atomic_int64 : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_KHR_shader_subgroup_ballot : require
+#extension GL_KHR_shader_subgroup_basic : require
+
+// ============================================================================
+// Pass 11: Compact Index Buffers
+// 1 thread per triangle.
+//
+// Removes degenerate triangles by compacting alive triangles into a
+// contiguous output buffer. Uses a two-level approach:
+//   1. Subgroup ballot counts alive threads and assigns local indices
+//   2. Subgroup leaders write counts to shared memory
+//   3. Thread 0 computes a sequential prefix sum over all subgroup counts
+//   4. One thread per workgroup reserves a global output block via atomicAdd
+//   5. Alive threads scatter their triangle data to the output
+//
+// Output is written to scanData[] (repurposed as temp storage).
+// Pass 12 copies the result back to indices[]/posIndices[].
+//
+// Prerequisites:
+//   - aliveFlags[] from Pass 10
+//   - counters[COUNTER_COMPACT_COUNT] must be 0 before dispatch
+//
+// Result:
+//   - Compacted indices written to scanData[]
+//   - counters[COUNTER_COMPACT_COUNT] = new triangle count
+// ============================================================================
+
+#include "common.glsl"
+#include "bindings.glsl"
+
+layout(local_size_x = WORKGROUP_SIZE) in;
+
+// Sized for worst-case subgroup size (4), giving up to 64 subgroups
+shared uint sgCounts[WORKGROUP_SIZE / 4 + 1];
+shared uint sgOffsets[WORKGROUP_SIZE / 4 + 1];
+shared uint wgOutputBase;
+shared uint wgTotal;
+
+void main() {
+    uint gid = gl_GlobalInvocationID.x;
+    uint lid = gl_LocalInvocationID.x;
+    uint subgroupIdx = gl_SubgroupID;
+
+    if (counters[COUNTER_TRIANGLE_COUNT] <= targetTriCount) return;
+
+    // Determine if this triangle is alive
+    bool alive = false;
+    if (gid < counters[COUNTER_TRIANGLE_COUNT]) {
+        alive = (aliveFlags[gid] != 0u);
+    }
+
+    // Step 1: Subgroup-level count and prefix
+    uvec4 ballot = subgroupBallot(alive);
+    uint sgAliveCount = subgroupBallotBitCount(ballot);
+    uint sgExclusiveIdx = subgroupBallotExclusiveBitCount(ballot);
+
+    // Step 2: Subgroup leaders write their counts to shared memory
+    if (gl_SubgroupInvocationID == 0u) {
+        sgCounts[subgroupIdx] = sgAliveCount;
+    }
+    barrier();
+
+    // Step 3: Thread 0 computes sequential prefix sum over all subgroup counts
+    uint numSubgroups = (WORKGROUP_SIZE + gl_SubgroupSize - 1u) / gl_SubgroupSize;
+    if (lid == 0u) {
+        uint running = 0u;
+        for (uint i = 0u; i < numSubgroups; i++) {
+            uint c = sgCounts[i];
+            sgOffsets[i] = running;
+            running += c;
+        }
+        wgTotal = running;
+    }
+    barrier();
+
+    // Step 4: First thread reserves global output space
+    if (lid == 0u) {
+        wgOutputBase = atomicAdd(counters[COUNTER_COMPACT_COUNT], wgTotal);
+    }
+    barrier();
+
+    // Step 5: Each alive thread writes its triangle to the output
+    if (!alive) return;
+
+    uint localIdx = sgOffsets[subgroupIdx] + sgExclusiveIdx;
+    uint globalIdx = wgOutputBase + localIdx;
+
+    uint srcBase = gid * 3u;
+    uint dstBase = globalIdx * 3u;
+
+    // Write to scanData[] as temporary storage
+    // First region: compacted indices, second region: compacted posIndices
+    uint posOffset = triangleCount * 3u;
+
+    scanData[dstBase + 0u] = indices[srcBase + 0u];
+    scanData[dstBase + 1u] = indices[srcBase + 1u];
+    scanData[dstBase + 2u] = indices[srcBase + 2u];
+
+    scanData[posOffset + dstBase + 0u] = posIndices[srcBase + 0u];
+    scanData[posOffset + dstBase + 1u] = posIndices[srcBase + 1u];
+    scanData[posOffset + dstBase + 2u] = posIndices[srcBase + 2u];
+}

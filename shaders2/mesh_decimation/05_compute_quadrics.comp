@@ -1,0 +1,142 @@
+#version 460
+#extension GL_EXT_shader_atomic_int64 : require
+
+// ============================================================================
+// Pass 5: Compute Per-Vertex Quadric Error Matrices + Init Triangle Descriptors
+// 1 thread per triangle.
+//
+// On iteration 0 with QEM: computes plane quadrics weighted by sqrt(area)
+// and accumulates them into each vertex via a workgroup-local shared-memory
+// hash map, converting O(3T) global atomics into O(V_unique) per workgroup.
+//
+// On all iterations: initializes triDescriptor[] to MAX for the atomic-min
+// scatter race in Pass 6.
+//
+// Prerequisites:
+//   - quadricsData[] must be cleared to 0 before first dispatch.
+//   - posIndices[] (PB) must be populated.
+//
+// Result:
+//   quadricsData[v*QUADRIC_FIELDS..] = sum of plane quadrics (iter 0 only)
+//   triDescriptor[] = MAX (ready for Pass 6 scatter)
+// ============================================================================
+
+#include "common.glsl"
+#include "bindings.glsl"
+
+layout(local_size_x = WORKGROUP_SIZE) in;
+
+// ============================================================================
+// Shared-memory quadric accumulation
+//
+// 512-slot open-addressing hash map keyed by vertex index.
+// Each slot: 1 uint key + QUADRIC_FIELDS ints (fixed-point).
+// Total: 512 * (4 + 44) = 24 KB shared memory.
+// Shared-memory atomics are ~20x faster than global on NVIDIA/AMD.
+// ============================================================================
+
+#define SMAP_SIZE 512u
+#define SMAP_MASK (SMAP_SIZE - 1u)
+#define SMAP_MAX_PROBE 32u
+
+shared uint smapKey[SMAP_SIZE];
+shared int  smapVal[SMAP_SIZE * QUADRIC_FIELDS];
+
+void smapAdd(uint vertIdx, Quadric qr) {
+    uint h = vertIdx & SMAP_MASK;
+    for (uint p = 0u; p < SMAP_MAX_PROBE; p++) {
+        uint s = (h + p) & SMAP_MASK;
+        uint prev = atomicCompSwap(smapKey[s], NONE, vertIdx);
+        if (prev == NONE || prev == vertIdx) {
+            uint base = s * uint(QUADRIC_FIELDS);
+            for (int i = 0; i < QUADRIC_FIELDS; i++) {
+                atomicAdd(smapVal[base + uint(i)], int(round(qr.q[i] * QUADRIC_SCALE)));
+            }
+            return;
+        }
+    }
+    atomicAddQuadric(vertIdx, qr);
+}
+
+// ============================================================================
+
+void main() {
+    uint tid = gl_LocalInvocationID.x;
+    uint gid = gl_GlobalInvocationID.x;
+
+    bool fullQuadricBuild = (costMode == COST_MODE_QEM) && (lightIteration == 0u);
+
+    if (fullQuadricBuild) {
+        for (uint t = tid; t < SMAP_SIZE; t += WORKGROUP_SIZE)
+            smapKey[t] = NONE;
+        uint totalVals = SMAP_SIZE * uint(QUADRIC_FIELDS);
+        for (uint t = tid; t < totalVals; t += WORKGROUP_SIZE)
+            smapVal[t] = 0;
+    }
+    barrier();
+
+    uint actualTriCount = counters[COUNTER_TRIANGLE_COUNT];
+    if (actualTriCount <= targetTriCount) return;
+    bool valid = (gid < actualTriCount);
+    if (valid && aliveFlags[gid] == 0u)
+        valid = false;
+    bool nonDegenerate = false;
+
+    uint i0, i1, i2;
+    vec3 p0, p1, p2;
+    vec4 plane;
+    float area2;
+
+    if (valid) {
+        uint baseIdx = gid * 3u;
+        i0 = posIndices[baseIdx + 0u];
+        i1 = posIndices[baseIdx + 1u];
+        i2 = posIndices[baseIdx + 2u];
+
+        p0 = loadVertex(i0).pos;
+        p1 = loadVertex(i1).pos;
+        p2 = loadVertex(i2).pos;
+
+        vec3 edge1 = p1 - p0;
+        vec3 edge2 = p2 - p0;
+        vec3 n = cross(edge1, edge2);
+        area2 = length(n);
+
+        nonDegenerate = (area2 >= 1e-12);
+
+        if (nonDegenerate) {
+            n /= area2;
+            float d = -dot(n, p0);
+            plane = vec4(n, d);
+
+            if (fullQuadricBuild) {
+                Quadric qr = quadric_from_plane(plane);
+                float weight = sqrt(area2 * 0.5);
+                for (int i = 0; i < 10; i++) qr.q[i] *= weight;
+                qr.q[10] = weight;
+
+                smapAdd(i0, qr);
+                smapAdd(i1, qr);
+                smapAdd(i2, qr);
+            }
+        }
+    }
+
+    barrier();
+    if (fullQuadricBuild) {
+        for (uint t = tid; t < SMAP_SIZE; t += WORKGROUP_SIZE) {
+            if (smapKey[t] != NONE) {
+                uint vertIdx = smapKey[t];
+                uint gBase = vertIdx * uint(QUADRIC_FIELDS);
+                uint sBase = t * uint(QUADRIC_FIELDS);
+                for (int i = 0; i < QUADRIC_FIELDS; i++) {
+                    atomicAdd(quadricsData[gBase + uint(i)], smapVal[sBase + uint(i)]);
+                }
+            }
+        }
+    }
+
+    if (gid < actualTriCount) {
+        triDescriptor[gid] = 0xFFFFFFFFFFFFFFFFul;
+    }
+}

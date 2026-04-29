@@ -1,0 +1,80 @@
+#version 460
+#extension GL_EXT_shader_atomic_int64 : require
+
+// ============================================================================
+// Pass 4: Build Unique Edge List
+// 1 thread per triangle.
+//
+// For each triangle, inserts its 3 edges into an edge hash map. Edges are
+// canonicalized by sorting vertex indices (min, max). Assigns unique edge
+// indices via atomicAdd on the edge counter.
+//
+// The edge hash map uses slot layout: (.x = vMin, .y = vMax, .z = edgeIdx)
+// This is different from passes 1-2 because the key is two vertex indices.
+//
+// Prerequisites:
+//   - edgeHashMap[] must be cleared to HASHMAP_EMPTY.
+//   - counters[COUNTER_EDGE_COUNT] must be 0.
+//
+// Result:
+//   edges[edgeIdx] = uvec2(v0, v1) with v0 < v1
+//   edgeTriangles[edgeIdx*2+0/1] = tri0, tri1  (tri1 = NONE if boundary)
+// ============================================================================
+
+#include "common.glsl"
+#include "bindings.glsl"
+
+layout(local_size_x = WORKGROUP_SIZE) in;
+
+void insertEdge(uint v0, uint v1, uint triIdx) {
+    uint eMin = min(v0, v1);
+    uint eMax = max(v0, v1);
+
+    uint mask = hashMapSize - 1u;
+    uint key = hash_edge(eMin, eMax) & mask;
+
+    for (uint probe = 0u; probe < MAX_PROBES; probe++) {
+        uint s = (key + probe) & mask;
+
+        uint prev = atomicCompSwap(edgeHashMap[s].x, HASHMAP_EMPTY, eMin);
+
+        if (prev == HASHMAP_EMPTY) {
+            edgeHashMap[s].y = eMax;
+
+            uint edgeIdx = atomicAdd(counters[COUNTER_EDGE_COUNT], 1u);
+            edgeHashMap[s].z = edgeIdx;
+
+            edges[edgeIdx] = uvec2(eMin, eMax);
+            edgeTriangles[edgeIdx * 2u + 0u] = triIdx;
+            edgeTriangles[edgeIdx * 2u + 1u] = NONE;
+            return;
+        }
+
+        memoryBarrierBuffer();
+
+        if (edgeHashMap[s].x == eMin && edgeHashMap[s].y == eMax) {
+            uint edgeIdx = edgeHashMap[s].z;
+
+            if (edgeIdx == HASHMAP_EMPTY) continue;
+
+            atomicCompSwap(edgeTriangles[edgeIdx * 2u + 1u], NONE, triIdx);
+            return;
+        }
+    }
+}
+
+void main() {
+    uint gid = gl_GlobalInvocationID.x;
+    if (gid >= counters[COUNTER_TRIANGLE_COUNT]) return;
+    if (counters[COUNTER_TRIANGLE_COUNT] <= targetTriCount) return;
+    if (aliveFlags[gid] == 0u) return;
+
+    uint baseIdx = gid * 3u;
+    uint v0 = posIndices[baseIdx + 0u];
+    uint v1 = posIndices[baseIdx + 1u];
+    uint v2 = posIndices[baseIdx + 2u];
+
+    insertEdge(v0, v1, gid);
+    insertEdge(v1, v2, gid);
+    insertEdge(v2, v0, gid);
+}
